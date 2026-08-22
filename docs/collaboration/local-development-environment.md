@@ -129,23 +129,56 @@ python3 benchmarks/qwen38_4090/evaluation/test.py check
 协议 PR 新增的测试命令以实际 crate 或 package 为准，必须写入 PR；不要为了让全量
 测试变绿而修改 evaluator、scorer 或无关示例。
 
-### M2-O0 可选 oracle 环境
+### M2-O0 oracle 编写与服务器执行
 
-只有在开始 checkpoint/tokenizer oracle 任务时才安装额外依赖，并在 progress/PR 中
-记录版本：
+成员2负责在本地编写可移植的 oracle/manifest/golden 生成器、参数校验和 synthetic
+fixture；成员1负责在服务器执行需要真实 checkpoint 的 oracle。成员2不需要、也不应在
+自己的电脑下载约 19.57 GiB 的 checkpoint、展开完整 BF16 权重或运行 8K/16K 逐层 oracle。
+当前 `transformers`/`vllm` 也没有原生 `qwen3_5` runtime，Qwen3Next 只能作为适配起点，
+不能把本地相近模型输出当作权威答案。
+
+当前服务器 SafeTensors header 的估算是：packed W4 逻辑参数约 24.30B，若全部展开为
+BF16 约 55.6 GB（不含 CUDA context、workspace、KV、GDN state 和临时 buffer）。这是
+容量预算证据，不是要求任何远程成员下载的环境要求；完整 BF16 副本也不是 oracle 的强制
+artifact，优先保存选择性 dequant block/golden，最终以服务器 manifest 的实际峰值为准。
+
+成员2本地只安装脚本实际需要的轻量依赖，并记录版本：
 
 ~~~bash
-python -m pip install transformers safetensors sentencepiece huggingface_hub
+python -m pip install safetensors numpy
 ~~~
 
-模型权重、tokenizer 私有文件和 oracle raw output 放在仓库外，例如：
+不把 `transformers`、模型权重或 tokenizer 私有文件列为成员2的必需环境。oracle CLI
+必须接受显式 `--model-dir`、`--output-dir`、`--revision` 和 `--layers/--stages` 参数，
+使成员1可以在服务器重放同一个 commit；本地用 synthetic W4 fixture 和 tiny input
+完成脚本/格式测试。
 
-~~~text
-../apxinf-private-models/<revision>/
-../apxinf-private-artifacts/<task-id>/<commit-sha>/
+需要真实 checkpoint 的一次性执行由成员1排入服务器 GPU 队列：
+
+~~~bash
+exec 9>/tmp/apxinf-gpu-job.lock
+flock -n 9 || exit 2
+export CUDA_VISIBLE_DEVICES=GPU-343bc895-b011-22fa-4449-97207aa2bdec
+export APXINF_SHARED_ARTIFACT_ROOT=/mnt/chuangxin/team2/artifacts/apxinf
+python tools/oracle/generate_golden.py \
+  --model-dir /mnt/chuangxin/team2/models/Qwen3.8-27B-AWQ-INT4 \
+  --output-dir "$APXINF_SHARED_ARTIFACT_ROOT/oracle/<revision>/<commit-sha>" \
+  --revision 63768c10df38c0395e12ef49edac1bd539eaeeea \
+  --layers 0,1,3,63
 ~~~
 
-不得把这些路径内容复制到 Git，也不得把真实 hidden case 或答案做成 fixture。
+实际命令、层选择和显存峰值必须写入 PR；`tools/oracle/generate_golden.py` 是成员2应创建
+的稳定入口。服务器输出至少包括 manifest、reference token IDs、selected layer
+hidden/state/logit golden、生成参数和 SHA256。原始权重、完整 BF16 展开副本和大日志只留
+在受控共享路径，不进 Git；远程成员消费 manifest、哈希和经批准导出的 golden artifact，
+不复制模型权重。
+
+上述命令中的 Python 依赖只在服务器 P0 job 的隔离环境中按生成器实际 imports 安装；成员2
+的电脑不需要安装 `transformers`、vLLM、`huggingface_hub` 或任何模型 serving runtime。
+若服务器侧借用 `transformers`/Qwen3Next 代码，只能作为适配参考；checkpoint-specific
+实现、逐层对拍和最终 artifact identity 仍由服务器 job 负责。成员1把可导出的最小 bundle
+通过批准的项目 artifact/release 通道提供给远程成员，并在 oracle handoff 中登记方式和
+SHA256；原始共享目录不作为远程成员的必需挂载点。
 
 ### 成员2不需要配置的内容
 

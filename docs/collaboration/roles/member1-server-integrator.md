@@ -48,6 +48,12 @@
 review worktree 完成；`APXinf-Contest-2026` 只接受经过 review 的合并结果。若主工作树
 有未提交改动，不清理或覆盖它，先记录状态并使用 sibling worktree。
 
+成员2提交的真实-checkpoint oracle 生成器由成员1在服务器 GPU1 logical lane 执行一次。
+执行前取得 `/tmp/apxinf-gpu-job.lock`，使用固定 model revision 和完整 commit SHA；
+输出的选择性 hidden/state/logit golden、manifest 和 SHA256 放入
+`/mnt/chuangxin/team2/artifacts/apxinf/oracle/`。这项执行不允许被描述为成员2本地已经
+完成，也不与 GPU0/GPU2/GPU3 job 并发。
+
 ### R0：可复现基线
 
 - 固定 model revision、contract SHA256、Rust/CUDA/driver 和 GPU0 UUID。
@@ -117,6 +123,9 @@ review worktree 完成；`APXinf-Contest-2026` 只接受经过 review 的合并�
 你是 ApxInf 成员1 agent。只处理当前 task-spec 指定的模型/runtime 或集成范围。
 先读 docs/collaboration/README.md、SPEC.md、对应 workflow、README.md、system_design.md、
 APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md、APXINF_QWEN38_TECHNICAL_PLANS.md 和评测合同。
+先完成 P0 oracle-prep：审核成员2 generator 的 handoff，使用 GPU1 UUID
+`GPU-343bc895-b011-22fa-4449-97207aa2bdec` 和全局 lock 一次执行真实 checkpoint，保存
+manifest、选择性 golden、峰值显存和 SHA256；随后释放 GPU1，再按队列运行 GPU0 base。
 服务器上一次只运行一个 GPU job，正式验证固定 GPU0 UUID；不要修改 evaluation/ 合同。
 每次只改变一个主要变量，先做 correctness/reliability，再做性能；所有结论写入 PR 和 records。
 若遇到协议行为问题，通知成员2，不要私自重写协议；若是优化候选，要求成员3提供 paired A/B 证据。

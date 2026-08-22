@@ -12,10 +12,10 @@
 
 最终采用一条“先取得资格、再按分/人时优化”的主线。当前 starter 仓库并没有 Qwen3.5、W4A16、GDN 或 HTTP/SSE 服务实现，因此不能把四周级别的完整系统路线当成两天内的默认承诺：
 
-1. 先并行造离线 oracle、协议 stub、checkpoint manifest 和最小算子测试；当前 transformers/vLLM 仅提供 Qwen3Next 相近实现，必须做 checkpoint-specific 适配并逐层对拍，不能把相近模型直接当权威 oracle；没有完成这一步就不进入大规模 Rust/CUDA 调试。
+1. 成员2负责离线 oracle 生成器、协议 stub、checkpoint manifest 和 synthetic W4 fixture；成员3并行负责 shape inventory、最小算子测试和 benchmark/replay harness。需要真实 checkpoint 的 oracle 执行由成员1在服务器带锁队列中一次完成。当前 transformers/vLLM 仅提供 Qwen3Next 相近实现，必须做 checkpoint-specific 适配并逐层对拍，不能把相近模型直接当权威 oracle；没有完成选择性 golden 生成就不进入大规模 Rust/CUDA 调试。
 2. 成员1负责一条可回滚的模型/runtime 主线：W4 解包/反量化、GDN 语义、full attention 特殊语义、GPU worker/状态适配和最终集成。成员2独立负责完整的 protocol surface（stub、schema、`/health`、admission、SSE/JSON、错误映射和恢复验收），再由成员1把真实模型 runtime 接入这份已测试的接口；这样协议资格闸不会与核心 forward 调试相互阻塞。GDN 先保留逐 token eager 路径作为 correctness fallback；chunk-scan 是后续性能路径，不能成为取得资格的唯一前置条件。
 3. 只把已证明的窄优化接入主线：prefill 先用 BF16 scratch + cuBLASLt，decode 再比较直读 packed-W4 GEMV；CUDA Graph 只覆盖已冻结 decode bucket；MTP 是 base TPOT/C4 goodput 的条件性实验，不是独立 bonus 或默认交付项，只有 target decoder 冻结后先做 K=1 feasibility probe 且端到端净收益成立才接入。
-4. 四张 4090 用于并行开发、oracle、profiling 和 bonus campaign，但 GPU0 在正式测量时必须独占、锁频/记录温度功耗；最终成绩只在固定 GPU0 UUID 上重放。
+4. 本地代码准备可以并行；服务器只有一个账号，所有真实 GPU/模型任务进入一个带 `flock` 的队列，不能四卡同时常驻模型。队列优先级为：一次性 oracle（GPU1 logical lane）→ GPU0 runtime/eligibility 集成与正式重放 → GPU2 kernel/profile replay → GPU3 context/C4/C8/vision/MTP replay。GPU0 正式测量必须独占、锁频/记录温度功耗；最终成绩只在固定 GPU0 UUID 上重放。
 5. 先保证 public 6/6、hidden >=11/12、protocol/reliability 和 99% success 的资格。轨迹是 5 分软目标，不是 eligibility 闸门；multimodal/context/multi 只能在文本 eligible 后作为增量。
 
 三套路线保留为技术选项，但实际执行不是三条独立全栈项目，而是一条共同主线加两个受限优化 lane：
@@ -102,13 +102,20 @@
 
 启动时生成 manifest，至少记录 tensor name、shape、dtype、量化 group、packed layout、device bytes 和 dispatch。当前已知分类：
 
-- MLP 与 full-attention projection：packed W4，group 32、asymmetric；zero-point 在 checkpoint 中也是按 4-bit 沿 packed dimension 存入 `I32`，必须先解包，不能按 `int8` 元素直接读取。
+- MLP 与 full-attention projection：packed W4，group 32、asymmetric；`weight_packed` 沿 K 打包，scale 沿 K 按 group-32，zero-point 则沿 N 打包到 I32，必须先按 tensor-specific 轴解包，不能按 `int8` 元素直接读取。
 - GDN `in_proj_qkv`/`in_proj_z`：W4。
 - GDN `in_proj_a`、`in_proj_b`、conv/norm：BF16；除第 0 层外，GDN `out_proj` 也按真实 index 为 packed W4，不能统一当 BF16。
 - embedding、lm_head、MTP、vision：BF16。
 - full attention 必须实现 `attn_output_gate=true`：`q_proj` 输出 2 x 6144，按 q/gate split，attention 输出乘 `sigmoid(gate)` 后再进 `o_proj`。
 - RoPE 只作用于 `partial_rotary_factor=0.25` 对应的 head_dim 前 64 维；mRoPE section/position 以 config 为准。
 - GDN recurrent state 使用 `mamba_ssm_dtype=float32`；按真实 config 计入预算。每层 recurrent state 约 `48 x 128 x 128 x 4 B = 3 MiB`，48 层约 144 MiB/请求，C8 约 1.15 GiB，不能漏算。
+
+当前 revision 的 token admission 以 checkpoint `text_config.vocab_size` 为权威（加载到
+runtime model config 后为 `vocab_size`；实测 `248320`，合法范围 `[0,248320)`），不是
+tokenizer `vocab_size`（实测 `248044`）。
+`image_token_id=248056` 落在 model vocab 范围内，必须被 vision 路径接受；协议仍须拒绝
+`4294967295`。R0 必须从实际 `config.json` 记录这些值，代码不能把 tokenizer 大小当作
+embedding/lm_head 的边界。
 
 禁止把所有 Linear 统一送进 W4 kernel，也禁止为了省事把全部权重转成 BF16。W4 kernel 的公式、pack/unpack 顺序、scale、zero-point、尾块和 group boundary 必须有 Python compressed-tensors 对照。
 
@@ -146,12 +153,19 @@
 
 `POST /v1/evaluations/generate` 必须：
 
-- 校验非空、逐项落在 tokenizer/model 有效词表范围内的 token ID（JSON 整数且非负；不能只做 `uint32` 类型检查，`4294967295` 这类越界值必须拒绝）、温度为 0、`max_new_tokens` 为正整数且满足 `prompt_tokens + max_new_tokens <= max_model_len` 及当前真实 device budget、`ignore_eos` 为布尔值、`stream` 为布尔值；不要固定要求 `max_new_tokens=128` 或 `ignore_eos=true`。功能题的 64-token/可 EOS 与性能题的 128-token/强制完整 budget 必须分别支持。
+- 校验非空、逐项落在 checkpoint `text_config.vocab_size`（加载到 runtime model config 后的
+  `vocab_size`）范围内的 token ID（当前实测 `[0,248320)`；不能用 tokenizer `248044`
+  作为 embedding 边界；JSON 整数且非负；不能只做 `uint32` 类型检查，`4294967295` 这类
+  越界值必须拒绝）、温度为 0、`max_new_tokens` 为正整数且满足
+  `prompt_tokens + max_new_tokens <= max_model_len` 及当前真实 device budget、
+  `ignore_eos` 为布尔值、`stream` 为布尔值；不要固定要求 `max_new_tokens=128` 或
+  `ignore_eos=true`。功能题的 64-token/可 EOS 与性能题的 128-token/强制完整 budget
+  必须分别支持。
 - `stream=true` 时以 SSE 返回：token index 从 0 连续递增，request_id 单流唯一，结束时发送 usage 和 `[DONE]`；`stream=false` 也是合法请求，必须返回 HTTP 200 且 `type=result` 的 JSON，包含 `output_ids` 和准确 usage。`ignore_eos=false` 时检测 `eos_token_id=[248046,248044]` 并立即终止；不要额外要求 EOS 必须被作为 event 发出，功能 exact 仍由最终解码文本决定。`ignore_eos=true` 时必须输出恰好请求的 `max_new_tokens` 个 token，即使提前生成 EOS 也继续。
 - capacity 在 admission 阶段拒绝，不能先触发不可恢复 CUDA OOM；
 - 客户端断开时取消请求并回收状态；CUDA error 后做健康探针，context 损坏时不得继续虚报 `status=ok`。
 
-协议资格 gate 必须由成员2对 stub 和真实服务分别执行，且逐项保留原始 HTTP/JSON 证据。以下 7 个负控全部使用 `stream=false`。当前 evaluator 对 malformed JSON 的硬条件仅为 HTTP 400；其余 6 个结构化负控必须同时返回 HTTP 400 和含 `error` 字段的 JSON。实现仍应让 malformed JSON 也返回统一 JSON error，以满足接口一致性和 PR review，但不要把这一建议误写成当前 scorer 的额外资格条件。
+协议资格 gate 必须由成员2对 stub 和真实服务分别执行，且逐项保留原始 HTTP/JSON 证据。六个可解析的结构化负控全部设置 `stream=false`；malformed JSON 以原始不可解析 body 发送，不能携带可解析的 `stream` 字段。当前 evaluator 对 malformed JSON 的硬条件仅为 HTTP 400；其余 6 个结构化负控必须同时返回 HTTP 400 和含 `error` 字段的 JSON。实现仍应让 malformed JSON 也返回统一 JSON error，以满足接口一致性和 PR review，但不要把这一建议误写成当前 scorer 的额外资格条件。
 
 | ID | 请求变体 |
 |---|---|
@@ -225,7 +239,9 @@ decode 的主导约束预计是带宽：backbone 约 13.19 GiB 加 `lm_head` 约
 
 ### 6.3 路径 C：状态/内存/调度实验 lane
 
-按“分值/人时/风险”排序。文本 `BASE_GOOD` 冻结后，多模态 vertical slice 可以与 C4 validity 并行；MTP 的 K=1 probe 是低成本的 TPOT/goodput 探针，但不阻塞 eligibility、C4 或多模态：
+按“分值/人时/风险”排序。文本 `BASE_GOOD` 冻结后，多模态 vertical slice 可以与 C4 validity
+在各自分支并行准备；真实 replay 仍服从服务器队列。MTP 的 K=1 probe 是低成本的
+TPOT/goodput 探针，但不阻塞 eligibility、C4 或多模态：
 
 1. paged KV 和严格 admission；
 2. continuous batching、C4/C8 fairness 和 queue accounting；
@@ -236,7 +252,7 @@ decode 的主导约束预计是带宽：backbone 约 13.19 GiB 加 `lm_head` 约
 
 MTP/KV 只有在文本已经 eligible、cold path 不退化、端到端 TPOT/context 有净收益、显存和恢复门禁通过后才可打开。MTP 的 exact verify 是正确性必要条件，不等于实现天然零风险；MTP 本身不产生独立 bonus 分值，收益来自 base TPOT 或 C4/C8 goodput 的改善。
 
-## 7. 四卡并行实验编排
+## 7. 多 GPU 逻辑 lane 与串行服务器队列
 
 ### 7.1 固定 GPU 身份
 
@@ -247,16 +263,31 @@ nvidia-smi -L
 nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version --format=csv
 ```
 
-用 UUID 而不是随意的 ordinal 绑定实验。下面的 `GPU0..GPU3` 是经 `nvidia-smi` 核实后的别名：
+用 UUID 而不是随意的 ordinal 绑定实验。下面的 `GPU0..GPU3` 是逻辑 lane 标签，不表示
+允许同时运行四个模型进程：
 
 | GPU | 用途 | 允许修改的范围 | 端口/目录原则 |
 |---|---|---|---|
-| GPU0 | 成员1集成、单卡最终候选、最终重放 | 主线集成和最终服务 | 唯一正式端口；只跑一个候选 |
-| GPU1 | Agent B 离线 oracle/正确性/服务 | Qwen3Next 语义适配、合成 hidden 代理集、loader、协议测试 | 独立端口、独立日志；允许离线多卡 reference |
-| GPU2 | Agent C SM89 kernel/Nsight | `apxinf-cuda` 候选和 profile 脚本 | 一次只跑一个 profile；保存 `.ncu-rep/.nsys-rep` |
-| GPU3 | context/C4/C8/vision/MTP benchmark | benchmark harness、vision 适配和 bonus 分支 | `BASE_GOOD` 后即可并行做 vision vertical slice；长任务与压力测试；不得修改 scorer |
+| GPU0 | 成员1集成、单卡最终候选、最终重放 | 主线集成和最终服务 | 正式 job；只跑一个候选 |
+| GPU1 | 一次性 oracle/正确性 replay | 真实 checkpoint 的选择性 layer golden 和 manifest | oracle job 完成后释放；不要求完整 BF16 常驻 |
+| GPU2 | 成员3 SM89 kernel/Nsight replay | `apxinf-cuda` 候选和 profile 脚本 | 排队执行一个 profile；保存 `.ncu-rep/.nsys-rep` |
+| GPU3 | context/C4/C8/vision/MTP replay | benchmark harness、vision 适配和 bonus 分支 | `BASE_GOOD` 后排队执行；不得修改 scorer |
 
-每张卡可各自常驻一份约 20 GiB 模型，但必须监控显存；正式成绩永远只使用 GPU0 的单卡运行。GPU1-3 的结果是候选证据，不是正式成绩。GPU0 正式 campaign 前清空其他 GPU 的长任务，记录温度/功耗/时钟，能锁频时使用 `nvidia-smi -lgc`，不能锁频时把 CV 和环境波动写入 artifact。
+服务器队列规则：所有真实模型/GPU job 先取得 `flock /tmp/apxinf-gpu-job.lock`，记录
+`queue_id`、提交时间、优先级、目标 UUID、commit/model/contract SHA、预计时长和 artifact
+目录；一次只允许一个 job 持有锁。成员2/3可以在本地继续写代码和准备 replay 包，但不能
+把“GPU1/2/3 lane”表述成同时运行的证据。GPU0 正式 campaign 前必须确认其他 GPU 无残留
+进程，记录温度/功耗/时钟；GPU1-3 结果始终是 development/replay evidence，不是正式成绩。
+
+服务器队列优先级固定为：
+
+1. `P0 oracle`：成员2 generator 的真实 checkpoint 选择性 golden，一次性完成；
+2. `P1 base`：成员1 GPU0 runtime、protocol、correctness、reliability 和 recovery；
+3. `P2 kernel`：成员3 GPU2 的单变量 paired A/B/profile；
+4. `P3 bonus`：成员3 GPU3 的 context/C4/C8/vision/MTP replay。
+
+同一优先级按提交顺序执行；运行中的 job 不被并发抢占。artifact 统一写入
+`/mnt/chuangxin/team2/artifacts/apxinf/<date>/<commit-sha>/<queue-id>/`。
 
 ### 7.2 实验记录格式
 
@@ -330,7 +361,7 @@ GPU：只使用已分配的 GPU UUID；不要使用其他 GPU。
 执行顺序：
 1. 先阅读 README、相关模块和现有测试；列出你理解的输入/输出契约。协议任务以 stub 为先，不等待完整模型 forward。
 2. 先写最小失败测试，再实现最小改动。
-3. 运行：cargo fmt --check；cargo test --workspace --locked；Python oracle/协议任务还要运行明确的最小命令和 hidden 代理集。协议 owner 必须逐项执行上面的 7 个 `stream=false` 负控（malformed 硬门为 400；其余 6 项为 400 + JSON `error`）、`valid_short_nostream_request`、`health_after_invalid_requests`、`health_contract_identity`，并覆盖 `max_new_tokens=64, ignore_eos=false` 的功能题、`max_new_tokens=128, ignore_eos=true` 的性能题、`stream=true` SSE 和两个 EOS ID 的停止/继续语义。
+3. 运行：cargo fmt --check；cargo test --workspace --locked；Python oracle/协议任务还要运行明确的最小命令和 hidden 代理集。协议 owner 必须逐项执行 malformed 原始 body（硬门为 400）和上面的 6 个 `stream=false` 结构化负控（均为 400 + JSON `error`）、`valid_short_nostream_request`、`health_after_invalid_requests`、`health_contract_identity`，并覆盖 `max_new_tokens=64, ignore_eos=false` 的功能题、`max_new_tokens=128, ignore_eos=true` 的性能题、`stream=true` SSE 和两个 EOS ID 的停止/继续语义。
 4. 若失败，保留原始错误，不绕过测试，不添加 fallback。
 5. 提交一个小 commit，并回复完整 SHA。
 
@@ -383,18 +414,17 @@ GPU：只使用分配的 GPU UUID；端口和日志目录必须独立。
 
 中期目标不是追求 262K 或全部 bonus，而是交出一份可被统一 cohort runner 获取和重放的真实 SHA：能启动、接口真实、文字正确性可测、至少有第一版端到端性能和报告骨架。PDF 明确中期是 Day4 19:00 freeze，之后统一 clean checkout、hidden + vLLM 评测。
 
-| 时间 | 成员1/GPU0 | GPU1 | GPU2 | GPU3 | 共同门禁 |
-|---|---|---|---|---|---|
-| 8/22 上午 | 固定 GPU/模型/合同 hash；建立分支和 artifact 目录；明确 starter 缺口 | 适配 Qwen3Next 离线 oracle，确认 Python 依赖 | W4 pack/unpack shape inventory、Nsight 环境 | benchmark runner、health/SSE probe | `test.py check`、clean build 基线 |
-| 8/22 下午 | 设计 qwen35 vertical slice 和 manifest schema | 生成 12 题 hidden 代理集、6 个 public golden 输入/输出；保存逐层 oracle 方案 | W4 I32 pack/zero-point 小 shape 对照，不合入 | contract hash、输入 manifest 记录 | oracle 可运行；服务 stub 可探测；不等待完整 Rust forward |
-| 8/22 晚间 | 提供最小 runtime adapter contract；loader hard gate | 独立完成 HTTP/SSE 服务 stub、schema/admission/错误恢复和全部 protocol gate；oracle smoke | M=1 packed-W4 GEMV microbench；prefill 只测 cuBLASLt baseline | 1K/8K client timing harness | 协议资格 gate、PR 接口证据和首个真实阻塞点可复核 |
-| 8/23 上午 | 接入 loader、W4 dequant→BF16 GEMM、单层/多层 forward | 对齐 layer 0/1 GDN 和 layer 3 full attention 的逐层 hidden/state | GDN kernel 形状与 FA2 可用性 profile | 显存账本、FP32 GDN state、VRAM leak | 单层 reference 对齐；先不宣称完整模型 |
-| 8/23 下午 | 先完成逐 token eager GDN 资格路径，再尝试 chunk-scan；full attention gate/partial RoPE | public 6/6 harness、hidden 代理功能题 | 只跑已能通过层级 correctness 的 decode候选 | report skeleton、midterm manifest | public correctness 目标 6/6；failure recovery 可测 |
-| 8/23 晚间 | 64 层文本执行器、runtime adapter 接入、状态/cancel 集成 | hidden 代理集 >=11/12 目标；完整 protocol regression、轨迹仅记录为软分 | paired decode GEMV/graph；不做 mega-kernel | 生成中期 artifact bundle | base 7 cell 初测；warmup 1 + measured 5；CV <= 10% |
-| 8/24 00:00-12:00 | 只修模型资格/可靠性和 adapter 集成，不开新架构 | 作为 protocol owner 跑全量负控、恢复、oracle 结果和限制 | 只跑已入围窄候选 | 汇总 baseline/candidate/失败分支 | public 6/6、hidden >=11/12、protocol gate、success 100% 目标 |
-| 8/24 12:00-17:00 | clean checkout、固定中期 SHA、冻结服务命令 | 从冻结 SHA 重跑 smoke | 导出 profile 和性能表 | 完成 midterm brief、hash、限制 | 所有产物由冻结 SHA 生成 |
-| 8/24 17:00-18:30 | 只做 final dry-run | health/SSE/负控制 | 停止可能污染温度/时钟的长任务 | 检查 JSON/schema/路径 | 不再 cherry-pick 未验证 commit |
-| 8/24 18:30-19:00 | 提交/打 tag，保存完整 SHA | 备份 raw artifacts | 备份 raw artifacts | 发布 bundle 清单 | 19:00 后不改中期 cohort |
+| 时间 | 本地并行开发（成员2/3） | 服务器队列 job（一次只运行一个） | 成员1集成动作 | 共同门禁 |
+|---|---|---|---|---|
+| 8/22 上午 | 成员2写 oracle/protocol skeleton 和 synthetic W4 fixture；成员3准备 shape inventory、benchmark runner | `P0 oracle-prep`：核对 GPU/模型/合同 hash、建立 artifact 目录 | 固定 `feat/qwen35-runtime` 和 adapter 边界 | `test.py check`、clean build 基线 |
+| 8/22 下午 | 成员2完成 oracle generator、12 题 synthetic proxy、6 个 public golden schema；成员3完成 paired harness | `P0 oracle`：执行选择性 layer golden，保存 manifest/hidden state schema | 审核 oracle 输出格式，准备 loader hard gate | oracle artifact 可消费；stub 可探测 |
+| 8/22 晚间 | 成员2完成 HTTP/SSE stub、schema/admission/恢复；成员3完成 1K/8K timing harness | `P1 protocol-smoke`：在真实服务接线后重放七项 gate和 8-token recovery | 提供最小 runtime adapter contract | protocol gate、接口证据、首个阻塞点可复核 |
+| 8/23 上午 | 成员2整理 layer golden 对照和 loader manifest；成员3整理 GDN/FA2 profile 配置 | `P1 base-layer`：逐层/逐状态 correctness replay | 接入 loader、W4 dequant→BF16 GEMM 和 vertical slice | 单层 reference 对齐；不宣称完整模型 |
+| 8/23 下午 | 成员2跑 public/hidden proxy 与协议 regression；成员3准备单变量 kernel candidate | `P1 base-eval`：eager GDN、full-attention gate、recovery | 接入 64 层文本执行器、state/cancel | public correctness、failure recovery 可测 |
+| 8/23 晚间 | 成员2冻结 oracle/protocol artifact；成员3冻结 paired A/B replay 包 | `P2 kernel`：只跑已通过 correctness 的单变量 GEMV/Graph candidate | 审核是否进入 BASE_GOOD 候选 | base cell 初测、warmup 1 + measured 5、CV <= 10% |
+| 8/24 00:00-12:00 | 成员2完善负控/恢复限制；成员3整理失败实验和报告 | `P1 final-base`，必要时再排 `P2/P3`，不并发启动 | 只修资格/reliability，不开新架构 | public 6/6、hidden >=11/12、protocol、success 目标 |
+| 8/24 12:00-17:00 | 两名远程成员从冻结 SHA 生成 replay 包和报告片段 | `P1 clean-replay`：从 clean checkout 重跑最小 smoke | 冻结中期 SHA、服务命令和 artifact | 所有产物由冻结 SHA 生成 |
+| 8/24 17:00-19:00 | 备份 PR/raw artifact，不再改集成文件 | 队列清空后只做 final dry-run；不得启动新长任务 | 打 tag、发布 bundle 清单 | 19:00 后不改中期 cohort |
 
 中期明确不做：MTP、prefix cache、262K/INT4 KV、复杂 vision 集成、全模型 mega-kernel、prefill offline autotune。它们不能阻塞中期 SHA；多模态只保留协议 fail-closed 和可行性记录。
 
@@ -415,10 +445,14 @@ GPU：只使用分配的 GPU UUID；端口和日志目录必须独立。
 
 ### 10.3 8 月 26 日：MTP 可行性、C8 和多模态
 
-- GPU2 在 target decoder 已冻结后先做 MTP K=1 feasibility probe；GPU3 可并行完成 C8 validity。MTP 只有在 target exact verify、强制首/中/末 reject rollback 和 off/on TPOT/功能题通过后才接入；接受率或端到端净收益不够就关闭。
+- GPU2 logical lane 在 target decoder 已冻结后先排 MTP K=1 feasibility probe；GPU3 的 C8 validity
+  只能作为后续队列 job。MTP 只有在 target exact verify、强制首/中/末 reject rollback 和
+  off/on TPOT/功能题通过后才接入；接受率或端到端净收益不够就关闭。
 - 只有 C8 满足 p95/Jain 才继续追 goodput；MTP probe 不得阻塞 C8 validity 或已通过的 `BASE_GOOD`。
 - prefix cache 本期默认跳过；除非主线提前冻结且有明确 cold/hit 合规 A/B，否则不为 measured prompt 复用牺牲基线。
-- `BASE_GOOD` 后即可在 GPU3 的隔离分支开发 vision/merger/mRoPE；只有文本服务和 context 配额冻结后才把它接入最终候选。public 4/4 失败就保持 `multimodal=false`，不要冒险破坏文字服务。多模态不作为文本不 eligible 的对冲。
+- `BASE_GOOD` 后即可在 GPU3 logical lane 的隔离分支准备 vision/merger/mRoPE；服务器
+  replay 必须排队，只有文本服务和 context 配额冻结后才把它接入最终候选。public 4/4
+  失败就保持 `multimodal=false`，不要冒险破坏文字服务。多模态不作为文本不 eligible 的对冲。
 
 ### 10.4 8 月 27 日：最终冻结
 
@@ -446,7 +480,7 @@ GPU：只使用分配的 GPU UUID；端口和日志目录必须独立。
 - base 7 cell 请求成功率 100%、输出完整 128 token、CV <= 10%；
 - 五个 reliability boolean 必须全部为真：`no_unexpected_oom`、`no_nan`、`no_fallback`、`no_xid`、`service_healthy_after_failure`。评测器会把任一 `false` 写成 `reliability_check_failed:<field>` 并令 `eligible=false`；这不是单纯从 10 分 Reliability 中扣分。容量边界的预期拒绝/可恢复失败必须与计分 cell 中的 unexpected OOM 区分；
 - 无 unexpected OOM、NaN、fallback、Xid；失败后服务健康；
-- protocol gate 全部通过：7 个 `stream=false` 负控（malformed 硬门为 400；其余 6 项为 400 + JSON `error`）、`valid_short_nostream_request`（8-token 非流式 `type=result`，200）、`health_after_invalid_requests`、`health_contract_identity`；`max_model_len` 按 `prompt + max_new_tokens` 执行总预算；
+- protocol gate 全部通过：malformed 原始 body（硬门为 400）和 6 个 `stream=false` 结构化负控（均为 400 + JSON `error`）、`valid_short_nostream_request`（8-token 非流式 `type=result`，200）、`health_after_invalid_requests`、`health_contract_identity`；`max_model_len` 按 `prompt + max_new_tokens` 执行总预算；
 - 峰值显存低于当前 profile 上限并有 safety margin；
 - 端到端收益超过测量噪声，或增加一个实际可得 bonus；PR review 证据从早期开始累计；
 - 有 feature-off 回滚、原始日志和完整 SHA。
@@ -466,7 +500,7 @@ GPU：只使用分配的 GPU UUID；端口和日志目录必须独立。
 
 - 固定合同、model revision、GPU UUID、driver/CUDA、完整 commit SHA 和 artifact hash；
 - baseline 与每个 accepted/rejected/inconclusive 实验的假设、命令、输入 hash、TTFT/TPOT median/CV、显存、正确性和结论；
-- 服务协议证据必须逐项记录 7 个 `stream=false` 负控（malformed JSON、空 token、负 token、`4294967295`、`temperature=0.1`、`max_new_tokens=max_model_len` over-budget、`images:["x"]`）：malformed 的 evaluator 硬门为 HTTP 400，其余 6 项为 HTTP 400 + JSON `error`，实现仍统一返回 JSON error；还要记录 `valid_short_nostream_request`（8-token 非流式 HTTP 200 `type=result`）、`health_after_invalid_requests`、`health_contract_identity`、functional `64 + ignore_eos=false`、performance `128 + ignore_eos=true`、`eos_token_id=[248046,248044]` 的停止/继续行为，以及 usage 与实际 token event 数一致性；
+- 服务协议证据必须逐项记录 malformed 原始 body（HTTP 400）和 6 个 `stream=false` 结构化负控（空 token、负 token、`4294967295`、`temperature=0.1`、`max_new_tokens=max_model_len` over-budget、`images:["x"]`，均为 HTTP 400 + JSON `error`）；实现仍可统一让 malformed 返回 JSON error。还要记录 `valid_short_nostream_request`（8-token 非流式 HTTP 200 `type=result`）、`health_after_invalid_requests`、`health_contract_identity`、functional `64 + ignore_eos=false`、performance `128 + ignore_eos=true`、`eos_token_id=[248046,248044]` 的停止/继续行为，以及 usage 与实际 token event 数一致性；
 - 公开/隐藏 trajectory 方法，说明 token ID 使用离散 Levenshtein，不使用语义 judge；
 - roofline 账本至少列出 54 GFLOP/token、165.2 BF16 TFLOPS、约 5.36 s@16K 算术下限、约 15.56 GiB/token decode 流量和按单位换算后的约 19.6--20.9 ms/token 乐观带宽估计；
 - context 六类任务、C4/C8 validity、goodput、p95、Jain 和失败恢复；
@@ -482,7 +516,7 @@ GPU：只使用分配的 GPU UUID；端口和日志目录必须独立。
 | 接口/错误处理 4 | `/health` 真实性、严格 schema、SSE、容量拒绝、unsupported capability |
 | 可复现性 4 | lockfile、CUDA arch、GPU/model/contract hash、raw artifact 和一键命令 |
 | 分析/决策 4 | roofline/NSys/NCU 解释、paired A/B、负结果和回滚理由 |
-| 工作流创新最多 5 | 四卡 lane、离线 oracle、hidden 代理集、typed evidence、自动化 gate、可重放 campaign |
+| 工作流创新最多 5 | 带锁 GPU 队列、服务器一次性 oracle、hidden 代理集、typed evidence、自动化 gate、可重放 campaign |
 
 ## 13. 最终提交前一键审计
 
@@ -512,4 +546,4 @@ python3 benchmarks/qwen38_4090/evaluation/test.py run \
 
 ## 14. 一句话决策
 
-成员1只维护一条可回滚的模型/runtime eligibility 主线并负责最终集成；成员2完整拥有 protocol surface、stub、负控/恢复验收和 oracle/hidden 证据；成员3只做已正确 vertical slice 的 decode/bonus 测量。四张卡并行开发，但 GPU0 正式 campaign 独占并单卡裁决。先拿到 public 6/6、hidden >=11/12、完整 protocol gate、五项 reliability boolean 和 99% success，再按分/人时打开 decode graph、65K/131K、C4、MTP K=1 probe、C8 和多模态；prefix cache、262K/INT4 KV、mega-kernel 不进入默认交付范围。
+成员1只维护一条可回滚的模型/runtime eligibility 主线并负责最终集成；成员2完整拥有 protocol surface、stub、负控/恢复验收和 oracle generator/hidden 证据；成员3只做已正确 vertical slice 的 decode/bonus 测量。本地代码准备可并行，服务器真实 GPU/模型任务由带锁队列按 oracle → GPU0 base → GPU2 kernel → GPU3 bonus 顺序执行，GPU0 正式 campaign 独占并单卡裁决。先拿到 public 6/6、hidden >=11/12、完整 protocol gate、五项 reliability boolean 和 99% success，再按分/人时打开 decode graph、65K/131K、C4、MTP K=1 probe、C8 和多模态；prefix cache、262K/INT4 KV、mega-kernel 不进入默认交付范围。

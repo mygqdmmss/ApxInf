@@ -50,7 +50,11 @@
 
 ### `/v1/evaluations/generate`
 
-- 接收预分词整数 `input_ids`；拒绝空数组、负数和超过词表的 `4294967295`。
+- 接收预分词整数 `input_ids`；范围上限取 checkpoint `text_config.vocab_size`（加载到
+  runtime model config 后为 `vocab_size`；实测 `248320`，合法范围 `[0,248320)`），不能
+  取 tokenizer `vocab_size`（实测 `248044`）；
+  `image_token_id=248056` 必须保留为合法 model token。仍需拒绝空数组、负数和
+  `4294967295`。
 - 只接受 `temperature=0`；`ignore_eos` 必须是布尔值。
 - 计算总预算 `len(input_ids) + max_new_tokens`，同时检查 `max_model_len` 和 device budget。
 - `stream=true`：SSE index 从 0 连续递增，request_id 不串线，终止事件带 usage 和 `[DONE]`。
@@ -59,11 +63,11 @@
 
 ### Protocol eligibility gate
 
-以下七项负控全部使用 `stream=false`，必须保存原始 status、响应 JSON/text、时间和 commit SHA：
+六项可解析的结构化负控使用 `stream=false`；malformed JSON 以原始不可解析 body 发送。必须保存原始 status、响应 JSON/text、时间和 commit SHA：
 
 | id | 请求 | 硬条件 |
 | --- | --- | --- |
-| `malformed_json` | body `{not-json` | HTTP 400 |
+| `malformed_json` | 原始 body `{not-json`（无可解析 `stream` 字段） | HTTP 400 |
 | `empty_input_ids` | `input_ids: []` | HTTP 400 + JSON `error` |
 | `negative_token_id` | `input_ids: [-1]` | HTTP 400 + JSON `error` |
 | `out_of_vocabulary_token_id` | `input_ids: [4294967295]` | HTTP 400 + JSON `error` |
@@ -76,10 +80,28 @@
 ## Oracle 与 hidden 代理集
 
 - 先锁定 checkpoint revision、tokenizer、generation config 和 EOS `[248046, 248044]`。
+- M2-O0 的边界是“本地写生成器，成员1服务器执行真实 checkpoint”：你不下载约 19.57 GiB
+  权重、不展开完整 BF16 模型，也不把 Qwen3Next 输出当作权威 oracle。生成器必须支持
+  成员1在 GPU1 logical lane、全局 lock 下选择性生成 layer golden，并输出 manifest、
+  golden schema、生成命令和 SHA256。
 - oracle 输出必须包含 input manifest、reference token IDs、decoded text、trajectory 完整 budget、生成参数和 SHA256。
 - 代理集覆盖 early/middle/late retrieval、distractor、multi-hop、revision-resolution、aggregate；不能复用公开答案。
 - 代理集只用于本地正确性和回归，可提交 synthetic fixture/manifest；平台真实 hidden case、答案和私有 tokenizer 数据绝不可提交，也不得把代理通过率写成 hidden 正式成绩。
 - 每个失败保存最小复现请求和服务恢复结果。
+
+W4 loader 单元测试必须使用合成 fixture，不能复制真实 tensor slice。至少覆盖：
+
+| Tensor | Shape / dtype | pack 轴 |
+| --- | --- | --- |
+| `k_proj.weight_packed` | `[1024,640] I32` | K (`640=5120/8`) |
+| `k_proj.weight_scale` | `[1024,160] BF16` | K group-32 |
+| `k_proj.weight_zero_point` | `[128,160] I32` | N (`128=1024/8`) |
+| `down_proj.weight_packed` | `[5120,2176] I32` | K |
+| `down_proj.weight_scale` | `[5120,544] BF16` | K group-32 |
+| `down_proj.weight_zero_point` | `[640,544] I32` | N (`640=5120/8`) |
+
+测试必须包含尾块、极值 nibble、group boundary 和 N/K 方向互换的负断言；完整规则见
+`SPEC.md` 的 “Oracle artifact 与 synthetic W4 fixture”。
 
 ## 本地开发与交付
 
@@ -105,7 +127,8 @@
 README.md、system_design.md、APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md、
 APXINF_QWEN38_TECHNICAL_PLANS.md，以及 run_evaluation.py protocol_checks 和
 score_submission.py reliability eligibility 代码。
-你的代码必须能在没有服务器 GPU 的本地 fake runtime 上运行；不要修改 evaluation/、scorer、
+你的代码必须能在没有服务器 GPU 的本地 fake runtime 上运行；不要下载 19.57 GiB checkpoint，
+不要展开完整 BF16 模型，也不要修改 evaluation/、scorer、
 核心 forward 或公开/hidden 答案。七项 stream=false protocol gate、8-token result、health
 恢复和 contract identity 必须逐项记录。需要 GPU 的结论交给成员1在固定 UUID 上重放。
 ```

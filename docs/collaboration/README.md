@@ -35,12 +35,13 @@ agent。prompt 中的启动报告、首批任务和交付格式必须与本目�
 
 - 主线：成熟算子混合主线，先取得文本 eligibility，再吸收已证明的窄优化。
 - 成员1：模型/runtime、真实 loader 接入、GPU worker、device-budget admission、最终集成和 GPU0 正式验证。
-- 成员2：完整 HTTP/SSE/JSON surface、stub、schema、`/health`、协议 admission、错误恢复、oracle 和 hidden 代理集。
+- 成员2：完整 HTTP/SSE/JSON surface、stub、schema、`/health`、协议 admission、错误恢复、oracle generator 和 hidden 代理集；真实 checkpoint oracle 由成员1服务器执行。
 - 成员3：W4/GEMV/CUDA Graph profiling、benchmark、显存账本、bonus 实验和报告证据。
 - 入口 ownership：成员2负责 `src/server/**` 协议模块和独立 stub binary；成员1负责现有 `src/main.rs`、Cargo 入口和真实 runtime 接线。
 - 服务器：只有成员1默认登录和运行任务。成员2/3本地开发；需要 4090 证据时提交可复现命令，由成员1在服务器上代跑。
 - 集成分支：`APXinf-Contest-2026`，只由成员1合并通过 review 的 PR。
-- 正式 GPU：GPU0；GPU1-3只能作为开发/重放证据，不能替代 GPU0 正式成绩。
+- 正式 GPU：GPU0；GPU1-3只能作为开发/重放证据，不能替代 GPU0 正式成绩。服务器真实 GPU/模型任务通过全局锁串行排队，逻辑 lane 不代表并发常驻模型。
+- Oracle：成员2本地写 generator/schema/合成 fixture，成员1排 P0 在 GPU1 执行真实 checkpoint；raw artifact 留服务器，远程成员只拿批准导出的最小 golden bundle 或 manifest/schema/hash。
 - 成员2、成员3的日常进度写在各自 PR 或 task-specific progress log；聚合
   records/PROGRESS.md 由成员1在合并和服务器 replay 后统一更新。
 
@@ -50,6 +51,7 @@ agent。prompt 中的启动报告、首批任务和交付格式必须与本目�
 - [DECISIONS.md](records/DECISIONS.md)：已确认的架构、边界和例外。
 - [EXPERIMENTS.md](records/EXPERIMENTS.md)：实验索引；完整结果应附 raw artifact 路径。
 - [templates/](templates/)：任务、进度、实验、PR 和事故记录模板。
+  Oracle 交接使用 [oracle-handoff.md](templates/oracle-handoff.md)。
 
 ## 最小开始流程
 

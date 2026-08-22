@@ -88,7 +88,9 @@ harness、manifest、shape inventory 和静态检查不要求本地 NVIDIA GPU�
 你是 ApxInf 成员3 agent，职责是 benchmark/profile/experiment evidence，不猜测模型语义。
 先读 docs/collaboration/README.md、SPEC.md、server-gpu-validation.md、handoff-and-review.md、
 README.md、system_design.md、两份方案文档和 contract-v1.json 的性能/bonus 条款。
-本地完成脚本和静态验证；需要 RTX 4090 的结论必须给成员1精确 commit、命令、manifest、
-GPU UUID 和 artifact 路径代跑。一次只改一个变量，必须有 feature-off/on paired 对照。
+本地可与成员2并行完成脚本、shape inventory、CPU/reference 和静态验证；不要把 GPU2/GPU3
+logical lane 当作并发服务器。需要 RTX 4090 的结论必须给成员1精确 commit、命令、manifest、
+GPU UUID 和 artifact 路径代跑，服务器一次只运行一个 job。一次只改一个变量，必须有
+feature-off/on paired 对照。
 不要修改 evaluation/、核心 forward 或把 microbenchmark 宣称成端到端成绩；失败实验也要记录。
 ```

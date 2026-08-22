@@ -1,7 +1,7 @@
 # ApxInf 三人协作规格
 
-版本：`v1.0`
-冻结日期：`2026-08-22`
+版本：`v1.1`
+冻结日期：`2026-08-23`
 维护人：成员1（集成 owner）
 
 ## 1. 目标与约束
@@ -31,7 +31,12 @@
 - `/health` 的真实合同 identity、model revision、`max_model_len`、`parallel_requests`、`fallback_active` 和 capabilities；
 - `POST /v1/evaluations/generate` 的 pre-tokenized integer `input_ids`、greedy `temperature=0`、EOS 语义、SSE/JSON 两种响应；
 - `max_model_len` 是 `prompt_tokens + max_new_tokens` 的总 admission 上限，同时还要服从实测 device budget；
-- 七项 protocol probe 全部使用 `stream=false`：malformed JSON、空 `input_ids`、负 token、`4294967295` 越界 token、`temperature=0.1`、`max_new_tokens=health.max_model_len` over-budget、`images:["x"]`；
+- token range 的权威边界是 checkpoint `config.json` 的 `text_config.vocab_size`
+  （加载到 runtime model config 后为 `vocab_size`；本模型实测为 `248320`，合法范围
+  `[0, 248320)`），不是 tokenizer 的 `vocab_size`（实测为
+  `248044`）；`image_token_id=248056` 因此仍是合法 model token，vision 路径不能用
+  tokenizer 词表值做拒绝边界。
+- 六项可解析的结构化 protocol probe 明确使用 `stream=false`：空 `input_ids`、负 token、`4294967295` 越界 token、`temperature=0.1`、`max_new_tokens=health.max_model_len` over-budget、`images:["x"]`；malformed JSON 是原始不可解析 body，只检查 HTTP 400；
 - malformed JSON 至少 HTTP 400；其余六项必须 HTTP 400 且 JSON 有 `error` 字段；随后 8-token 合法非流式请求必须 HTTP 200、`type:"result"`、一个 output token 和正确 usage；
 - 五项 reliability boolean 都是 eligibility gate：`no_unexpected_oom`、`no_nan`、`no_fallback`、`no_xid`、`service_healthy_after_failure`。任一失败，`eligible=false`，不是简单扣分。
 
@@ -62,9 +67,68 @@
 ### 3.3 Loader 与 admission handoff
 
 - 成员2拥有 checkpoint 文件解析、revision/shape/dtype/W4 metadata 校验和不可变 `LoaderManifest` API；成员1拥有把 manifest 消费进生产模型和显存 residency 的接线。
+- W4 loader 交接必须明确两个不同的 pack 轴：以 `k_proj` 为代表，
+  `weight_packed` 沿 K 打包（`[1024, 640] I32`，`640=5120/8`），
+  `weight_scale` 按 K 的 group-32（`[1024, 160] BF16`，`160=5120/32`），而
+  `weight_zero_point` 沿 N 打包（`[128, 160] I32`，`128=1024/8`）。不能把 zero-point
+  误解为沿 K 打包；down projection 的对应 inventory 为
+  `weight_packed [5120,2176]`、`weight_scale [5120,544]`、
+  `weight_zero_point [640,544]`。这些 shape 是 loader/fixture 的方向性验收约束，
+  不是允许提交真实权重切片的理由。
+- M2-O0 的 oracle 采用“成员2写生成器，成员1服务器一次性执行”的交接：成员2不下载或
+  展开完整 checkpoint，不把本地 Qwen3Next 输出当权威；成员1在 GPU1 logical lane、全局
+  GPU lock 下生成选择性 layer golden 和 manifest，落到受控共享 artifact 路径。PR 只提交
+生成器、synthetic W4 fixture、golden schema 和 SHA256，不提交权重、完整 BF16 副本或
+  hidden 答案。
 - 成员2拥有纯协议 admission：JSON/schema/type/range、token vocabulary、`temperature`、未知字段和 `prompt + max_new_tokens <= max_model_len`。
 - 成员1拥有 runtime capacity admission：当前显存、per-request state/page、并发槽位和可恢复容量拒绝。
 - 两类 admission 通过一个不暴露 CUDA 内部类型的 `RuntimeCapabilities`/`AdmissionDecision` 接口交接；成员2不读取 CUDA allocator，成员1不绕过协议校验。
+
+### 3.4 Oracle artifact 与 synthetic W4 fixture
+
+Oracle 分为两个阶段：成员2提交可在 CPU 上检查的生成器、schema 和 synthetic fixture；
+成员1在服务器 GPU1 logical lane 执行一次真实 checkpoint oracle，生成选择性层的
+hidden/state/logit golden。服务器使用全局 GPU lock，artifact 放在
+`/mnt/chuangxin/team2/artifacts/apxinf/oracle/<revision>/<commit-sha>/`，记录完整命令、
+model revision、GPU UUID、显存峰值和 SHA256。远程成员只消费 manifest、golden schema 和
+获准的 golden 文件，不下载或展开完整模型。服务器原始产物默认只在受控共享存储保留；
+需要远程成员本地重放时，成员1只导出不含模型权重、私有 hidden 答案或凭据的最小
+golden bundle，并通过项目批准的 artifact/release 通道传递，同时在 handoff record
+登记导出方式、文件清单和 SHA256。没有批准的导出包时，远程成员只消费 manifest/schema/
+hash，不能自行复制服务器目录或模型。
+
+“一次执行”按 artifact identity 定义：`generator SHA + model revision + input manifest SHA +
+layer/stage selection + schema version` 不变时复用已有 artifact；任一项变化才重新排 P0
+oracle job。完整 BF16 权重副本不是强制交付物，优先流式/逐层反量化并只持久化选择性
+dequant block 和 golden。大型 golden 保留在服务器供 replay；远程成员默认只读取 PR 中的
+manifest/hash/schema，只有小型、公开且非敏感的 synthetic fixture 才进入 Git。
+
+提交的 synthetic W4 fixture 必须同时测试两个不同的打包方向，至少包含以下 inventory：
+
+| Tensor | Shape / dtype | 方向与公式 |
+| --- | --- | --- |
+| `k_proj.weight_packed` | `[1024, 640] I32` | 沿 K 打包，`640 = 5120 / 8` |
+| `k_proj.weight_scale` | `[1024, 160] BF16` | 沿 K，每 32 个 K 一组，`160 = 5120 / 32` |
+| `k_proj.weight_zero_point` | `[128, 160] I32` | 沿 N 打包，`128 = 1024 / 8` |
+| `down_proj.weight_packed` | `[5120, 2176] I32` | 沿 K 打包，`2176 = 17408 / 8` |
+| `down_proj.weight_scale` | `[5120, 544] BF16` | 沿 K，每 32 个 K 一组，`544 = 17408 / 32` |
+| `down_proj.weight_zero_point` | `[640, 544] I32` | 沿 N 打包，`640 = 5120 / 8` |
+
+fixture 还必须覆盖非对齐尾块、极值 4-bit 值、group boundary 和 N/K 互换会失败的
+定向断言。不得从真实 checkpoint 复制 tensor slice；fixture 的数值、pack/unpack 公式和
+期望 BF16/F32 输出必须完全由测试生成。
+
+真实 oracle 的 golden coverage 分三层，避免把每个 8K/16K 层 hidden 全量落盘：
+
+1. **短序列层级层**：覆盖所有 64 层的轻量 checksum/shape/state summary，并对每种层型
+   保存可数值比较的输入/输出；至少覆盖早/中/晚 GDN 和早/中/晚 full-attention。
+2. **五类 kernel acceptance（F/G/H/I/J）**：每一类保存独立的 input、参数 manifest、
+   output hidden/state/logit 和误差统计，能由成员1或成员2单独重放，不依赖完整模型副本。
+3. **长序列层级层**：8K/16K 只对 task-spec 指定的代表层和最终 logits/state 生成 golden；
+   采用流式逐层读取，服务器保留 raw artifact，Git 只记录 manifest/hash/schema。
+
+若某个 F/G/H/I/J acceptance cell 需要增加层或序列长度，成员2在 handoff record 中修改
+selection 并重新排 P0；不能让远程成员通过下载完整权重替代服务器 oracle。
 
 ## 4. 三个角色的交付边界
 
@@ -76,7 +140,7 @@
 
 ### 成员2：协议与 oracle
 
-负责完整协议 surface、schema、`/health`、SSE/JSON、错误映射、容量拒绝和失败恢复；负责 checkpoint manifest、Python/reference oracle、hidden 代理集、token trajectory 记录和 protocol gate 原始证据。
+负责完整协议 surface、schema、`/health`、SSE/JSON、错误映射、容量拒绝和失败恢复；负责 checkpoint manifest、Python/reference oracle generator、hidden 代理集、token trajectory 记录和 protocol gate 原始证据。真实 checkpoint golden 由成员1按 M2-O0 服务器队列执行。
 
 不负责核心 forward、CUDA 性能和 scorer；不得通过修改 evaluator 让测试变绿。
 
@@ -155,7 +219,7 @@
 | --- | --- | --- |
 | `no_unexpected_oom` | 任一 scored base cell 出现 OOM/out-of-memory；已预期、被 admission 拒绝且恢复的容量边界不算 unexpected | 任一 false 使整份 `eligible=false` |
 | `no_nan` | evaluator 在 scored base row 的 `output_text` 中看到 `nan/+nan/-nan`；内部 tensor NaN 需额外 instrumentation 才能发现 | 任一 false 使整份 `eligible=false` |
-| `no_fallback` | health、error 或 output evidence 出现 fallback，或最终 health 不再为 false | 任一 false 使整份 `eligible=false` |
+| `no_fallback` | health、error 或 output evidence 出现 fallback，或最终 `/health.fallback_active` 不为 `false` | 任一 false 使整份 `eligible=false` |
 | `no_xid` | 运行期间发现 Xid，或 evaluator 无法取得 Xid evidence | 任一 false 使整份 `eligible=false` |
 | `service_healthy_after_failure` | campaign 结束 health 不正常，或失败后恢复探针失败 | 任一 false 使整份 `eligible=false` |
 

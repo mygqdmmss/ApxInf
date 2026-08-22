@@ -10,7 +10,7 @@
 
 > 执行入口：结合 `Agent4System-0820.pdf`、多卡实验环境和 2026-08-24/27 截止时间后的单主线执行方案见 [APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md](APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md)。本文件保留三条高分路线的技术比较；实际合入、分工和冻结以执行入口为准。
 
-> 协作裁决：成员1维护唯一可回滚的模型/runtime eligibility 主线并负责最终集成；成员2拥有完整 protocol surface、stub、负控/恢复验收，以及离线 oracle/hidden 代理集证据；成员3负责已正确 vertical slice 的 CUDA/benchmark/bonus 实验。四张 4090 用于并行开发，但正式成绩只以 GPU0 的单卡重放为准。
+> 协作裁决：成员1维护唯一可回滚的模型/runtime eligibility 主线并负责最终集成；成员2拥有完整 protocol surface、stub、负控/恢复验收，以及 oracle 生成器/hidden 代理集证据；成员3负责已正确 vertical slice 的 CUDA/benchmark/bonus 实验。代码准备可并行，但服务器真实 GPU/模型任务进入带锁队列；正式成绩只以 GPU0 的单卡重放为准。
 
 ---
 
@@ -78,7 +78,7 @@
         ↓
 单请求性能优化与显存余量冻结
         ↓
-长上下文 → C4 → MTP K=1 probe / 多模态并行 → C8 → 其余逐项验收
+长上下文 → C4 → MTP K=1 probe / 多模态 replay（按服务器队列串行） → C8 → 其余逐项验收
         ↓
 clean-checkout 重放 + REPORT/PR 证据审计
 ```
@@ -99,6 +99,17 @@ clean-checkout 重放 + REPORT/PR 证据审计
 - 本地模型文件、公开 corpus hash、模型 revision 和所需 Python 依赖均已核验。
 - 当前 `transformers==4.57.0` 与 `vllm==0.11.0` 都没有原生 `Qwen3_5ForConditionalGeneration`/`qwen3_5` runtime（可见的相近实现是 `Qwen3Next*`）；因此 Qwen3Next 只能作为离线语义适配起点，不能未经逐层对拍就当作权威 oracle。oracle 交付必须包含 checkpoint-specific config 修补、W4 解包、GDN state、full-attention gate/partial-RoPE 和逐层 hidden/state/logit 对照。
 
+oracle 的执行边界：成员2在本地提交生成器、manifest/schema、synthetic W4 fixture 和
+选择性 layer/stage 参数；成员1在服务器 GPU1 logical lane 通过全局 lock 执行真实
+checkpoint，一次生成可审计的 hidden/state/logit golden。成员2不下载或展开完整模型，
+远程成员只消费 golden artifact 和 SHA256。完整 BF16 展开规模、显存峰值和实际可生成的
+层集合以服务器 manifest 为准，不写成远程电脑的环境前置条件。
+
+服务器保留 raw oracle 产物和大 golden；远程成员若需要本地重放，只能消费成员1批准导出的
+最小 golden bundle（不含模型权重、私有 hidden 答案或凭据）。导出方式、文件清单和
+SHA256 写入 `docs/collaboration/templates/oracle-handoff.md`；没有批准的 bundle 时，
+远程成员只使用 manifest/schema/hash，不自行复制服务器目录。
+
 ### 3.2 模型结构
 
 - 架构：`Qwen3_5ForConditionalGeneration`，`model_type=qwen3_5`。
@@ -109,12 +120,19 @@ clean-checkout 重放 + REPORT/PR 证据审计
 - 原生最大位置为 262144。
 - checkpoint 含视觉塔：27 层，vision hidden size 1152；`deepstack_visual_indexes=[]`，默认不实现 deepstack 注入。
 - checkpoint 含 `mtp.*` 张量和一层 MTP 权重；当前 `config.json` 的 `mtp_num_hidden_layers` 字段并不能作为可靠开关，启用前必须以权重索引和实际 tensor shape 为准解析，不依赖版本差异的配置字段。
-- 量化是逐模块混合的，不是所有 Linear 都为 W4：MLP 和 full-attention projection 使用 packed W4；GDN 的 `in_proj_qkv`/`in_proj_z` 为 W4，`in_proj_a`、`in_proj_b`、conv/norm 为 BF16，而除第 0 层外 GDN `out_proj` 也是 packed W4；embedding、lm_head、MTP 和 vision 为 BF16。zero-point 是沿 packed dimension 以 4-bit 打包到 I32，不是可直接按 int8 元素读取。kernel dispatch 和显存预算必须按真实 tensor dtype 分类。
+- 量化是逐模块混合的，不是所有 Linear 都为 W4：MLP 和 full-attention projection 使用 packed W4；GDN 的 `in_proj_qkv`/`in_proj_z` 为 W4，`in_proj_a`、`in_proj_b`、conv/norm 为 BF16，而除第 0 层外 GDN `out_proj` 也是 packed W4；embedding、lm_head、MTP 和 vision 为 BF16。`weight_packed` 沿 K 打包，scale 沿 K 按 group-32，zero-point 沿 N 打包到 I32；两个 pack 轴不能混用。kernel dispatch 和显存预算必须按真实 tensor dtype 分类。
+- W4 方向性验收使用 synthetic fixture：`k_proj.weight_packed [1024,640] I32`、scale
+  `[1024,160] BF16`、zero-point `[128,160] I32`；`down_proj` 对应为 packed
+  `[5120,2176]`、scale `[5120,544]`、zero-point `[640,544]`。尾块、极值 nibble、
+  group boundary 和 N/K 互换必须有定向断言，不能从真实 checkpoint 提交 tensor slice。
+- token admission 以 checkpoint `text_config.vocab_size` 为边界（加载到 runtime model
+  config 后为 `vocab_size`；实测 `248320`），不是 tokenizer `vocab_size`（实测
+  `248044`）；`image_token_id=248056` 是合法 model token。
 - config 的 `attn_output_gate=true` 要求 q_proj 的 12288 输出拆为 q/gate，attention 输出乘 `sigmoid(gate)`；`partial_rotary_factor=0.25` 表示 RoPE 只作用于 head_dim 前 64 维；`mamba_ssm_dtype=float32` 要求 GDN recurrent state 用 FP32。
 
 ### 3.3 权重与显存预算
 
-本地 checkpoint 约 19.57 GiB。按 tensor 名称估算：语言主干约 13.19 GiB，embedding 约 2.37 GiB，lm_head 约 2.37 GiB，vision 约 0.86 GiB，MTP 约 0.79 GiB。纯文本常驻权重约 17.93 GiB；在 24564 MiB 显存上，CUDA context、workspace、FP32 GDN state、KV、临时 buffer 和碎片可用空间很紧。
+本地 checkpoint 约 19.57 GiB。按 tensor 名称估算：语言主干约 13.19 GiB，embedding 约 2.37 GiB，lm_head 约 2.37 GiB，vision 约 0.86 GiB，MTP 约 0.79 GiB。纯文本常驻权重约 17.93 GiB；在 24564 MiB 显存上，CUDA context、workspace、FP32 GDN state、KV、临时 buffer 和碎片可用空间很紧。完整 BF16 展开规模只作为服务器 manifest 的预算事实，不是要求远程成员下载或运行的本地前置条件。
 
 16 个 full-attention 层的 BF16 KV 约为：
 
@@ -206,11 +224,11 @@ roofline 账本：合同给出的冻结代理 54 GFLOP/token 在 16K prefill 约
 - `pretokenized_input_ids=true`、`token_id_output=true`；
 - 多模态未全部验收前 `multimodal=false`。
 
-`POST /v1/evaluations/generate` 必须严格接收预分词 `input_ids`、`temperature=0` 和请求声明的 `stream`。每个 `input_ids` 必须是 JSON 整数、非负且落在 tokenizer/model 有效词表范围内；不能只检查 `uint32` 而放过 `4294967295` 这类越界值。校验 `max_new_tokens` 为正整数，并同时满足 `prompt_tokens + max_new_tokens <= max_model_len` 与当前真实 device budget；`max_model_len` 是总 token admission 上限，不是只供 `/health` 展示的字段。`ignore_eos` 为布尔值，不能固定要求 128 或 `ignore_eos=true`。功能题通常是 `max_new_tokens=64, ignore_eos=false`，性能/轨迹/上下文/多请求题是 `max_new_tokens=128, ignore_eos=true`。服务从 checkpoint `generation_config.json` 核对 `eos_token_id=[248046,248044]`：前者遇到 EOS 立即停止，后者即使遇到 EOS 也继续到完整 budget。评测器只按跳过 special token 后的解码文本做 exact 比较，不单独检查 stop reason；这不意味着可以省略 EOS stop 逻辑，也不应把“EOS 必须作为 token event 发出”写成额外资格门。`stream=true` 时 SSE index 必须连续，终止事件包含 usage 和 `[DONE]`；`stream=false` 必须返回 HTTP 200 且 `type=result` 的 JSON，包含 `output_ids` 和 usage。两种模式的 usage 都与实际返回 token 数一致。
+`POST /v1/evaluations/generate` 必须严格接收预分词 `input_ids`、`temperature=0` 和请求声明的 `stream`。每个 `input_ids` 必须是 JSON 整数、非负且落在 checkpoint `text_config.vocab_size` 范围内（加载到 runtime model config 后为 `vocab_size`；当前 revision 实测 `[0,248320)`）；不能用 tokenizer `vocab_size=248044` 作为 embedding 边界，因为 `image_token_id=248056` 仍是合法 model token；也不能只检查 `uint32` 而放过 `4294967295` 这类越界值。校验 `max_new_tokens` 为正整数，并同时满足 `prompt_tokens + max_new_tokens <= max_model_len` 与当前真实 device budget；`max_model_len` 是总 token admission 上限，不是只供 `/health` 展示的字段。`ignore_eos` 为布尔值，不能固定要求 128 或 `ignore_eos=true`。功能题通常是 `max_new_tokens=64, ignore_eos=false`，性能/轨迹/上下文/多请求题是 `max_new_tokens=128, ignore_eos=true`。服务从 checkpoint `generation_config.json` 核对 `eos_token_id=[248046,248044]`：前者遇到 EOS 立即停止，后者即使遇到 EOS 也继续到完整 budget。评测器只按跳过 special token 后的解码文本做 exact 比较，不单独检查 stop reason；这不意味着可以省略 EOS stop 逻辑，也不应把“EOS 必须作为 token event 发出”写成额外资格门。`stream=true` 时 SSE index 必须连续，终止事件包含 usage 和 `[DONE]`；`stream=false` 必须返回 HTTP 200 且 `type=result` 的 JSON，包含 `output_ids` 和 usage。两种模式的 usage 都与实际返回 token 数一致。
 
-协议资格 gate 由成员2对 stub 和真实服务分别执行：7 个负控都用 `stream=false`。对 malformed JSON，当前 evaluator 的硬条件是 HTTP 400；对其余 6 个结构化负控（`input_ids=[]`、`[-1]`、`[4294967295]`、`temperature=0.1`、`max_new_tokens=health.max_model_len` 的 over-budget、`images:["x"]`），硬条件是 HTTP 400 且 JSON 含 `error`。实现可统一让 malformed JSON 也返回 JSON error，但不能把它误记成 scorer 的额外硬条件。随后必须通过 8-token 合法非流式请求（HTTP 200、`type=result`、一个 `output_ids`、usage 为 8+1），再检查 `/health.status=ok` 和合同 identity；任何负控污染、恢复失败或 identity 不符都使 `protocol_pass=false`。容量不足必须在 admission 阶段拒绝，不能先触发不可恢复 CUDA OOM。
+协议资格 gate 由成员2对 stub 和真实服务分别执行：6 个可解析的结构化负控都用 `stream=false`；malformed JSON 以原始不可解析 body 发送。对 malformed JSON，当前 evaluator 的硬条件是 HTTP 400；对其余 6 个结构化负控（`input_ids=[]`、`[-1]`、`[4294967295]`、`temperature=0.1`、`max_new_tokens=health.max_model_len` 的 over-budget、`images:["x"]`），硬条件是 HTTP 400 且 JSON 含 `error`。实现可统一让 malformed JSON 也返回 JSON error，但不能把它误记成 scorer 的额外硬条件。随后必须通过 8-token 合法非流式请求（HTTP 200、`type=result`、一个 `output_ids`、usage 为 8+1），再检查 `/health.status=ok` 和合同 identity；任何负控污染、恢复失败或 identity 不符都使 `protocol_pass=false`。容量不足必须在 admission 阶段拒绝，不能先触发不可恢复 CUDA OOM。
 
-协议清单是 eligibility gate，不是 PR review 的可选加分项。协议 owner 的原始证据必须逐项包含：`malformed_json`（HTTP 400）、`empty_input_ids`、`negative_token_id`、`out_of_vocabulary_token_id`、`unsupported_temperature`、`over_budget`、`unsupported_modality_field`（后六项均为 HTTP 400 + JSON `error`）、`valid_short_nostream_request`（8-token `stream=false` result）、`health_after_invalid_requests`，以及 `health_contract_identity`。这样 `/health.max_model_len` 同时被当作真实能力声明和 `prompt + output` 总预算上限。
+协议清单是 eligibility gate，不是 PR review 的可选加分项。协议 owner 的原始证据必须逐项包含：`malformed_json`（原始不可解析 body，HTTP 400）、`empty_input_ids`、`negative_token_id`、`out_of_vocabulary_token_id`、`unsupported_temperature`、`over_budget`、`unsupported_modality_field`（后六项均为 `stream=false`、HTTP 400 + JSON `error`）、`valid_short_nostream_request`（8-token `stream=false` result）、`health_after_invalid_requests`，以及 `health_contract_identity`。这样 `/health.max_model_len` 同时被当作真实能力声明和 `prompt + output` 总预算上限。
 
 服务结构采用一个 GPU runtime owner + bounded request channel；HTTP task 不直接共享可变模型。每个请求拥有独立 state handle、request id、取消标志和回收 guard。所有 CUDA error 转成请求级错误后执行 stream/context 健康探针；如果 CUDA context 已损坏，health 不得继续虚报正常。
 
@@ -230,7 +248,7 @@ roofline 账本：合同给出的冻结代理 54 GFLOP/token 在 16K prefill 约
 
 **多请求**：在单请求基线冻结后验证 C4 再验证 C8。每 cell 为 32 requests × 1024 prompt × 128 output；成功率和正确率 100%、Jain≥0.95、p95 TTFT≤1.5×、p95 TPOT≤3×、结束后健康。调度必须计入客户端排队时间，不能用服务端时间替代。
 
-**多模态**：合同指定 `Qwen3VLProcessor` + `Qwen2VLImageProcessorFast`，输入为 448x448 RGB PNG；不要自行发明 processor。`deepstack_visual_indexes=[]` 时不注入 deepstack。`POST /v1/chat/completions` 接受一个 base64 PNG part 后接一个 text part，temperature 0、`max_completion_tokens=32`、`stream=false`、`enable_thinking=false`。`BASE_GOOD` 后即可在独立 GPU3 分支并行开发和对拍，但只有 public 4/4、hidden 8/8、全部请求成功、health 正常、无外部 fallback 后才打开 capability；否则 `multimodal=false` 并以 HTTP 400/415/422/501 和 `error.type=unsupported_capability` fail closed。
+**多模态**：合同指定 `Qwen3VLProcessor` + `Qwen2VLImageProcessorFast`，输入为 448x448 RGB PNG；不要自行发明 processor。`deepstack_visual_indexes=[]` 时不注入 deepstack。`POST /v1/chat/completions` 接受一个 base64 PNG part 后接一个 text part，temperature 0、`max_completion_tokens=32`、`stream=false`、`enable_thinking=false`。`BASE_GOOD` 后即可在独立 GPU3 分支并行准备和对拍，服务器 replay 仍服从全局队列；只有 public 4/4、hidden 8/8、全部请求成功、health 正常、无外部 fallback 后才打开 capability；否则 `multimodal=false` 并以 HTTP 400/415/422/501 和 `error.type=unsupported_capability` fail closed。
 
 ### 4.6 共用 feature flags 与回滚
 
@@ -634,18 +652,21 @@ REPORT 和机器日志必须展示：
 
 ### 9.3 bonus 验证顺序
 
-按“分值 / 人时 / correctness 风险”排序，而不是按理论上限排序。文本 `BASE_GOOD` 冻结后，多模态 vertical slice 与 MTP K=1 probe 可以在隔离 lane 并行；MTP 不是独立计分项，若没有端到端净收益立即关闭。
+按“分值 / 人时 / correctness 风险”排序，而不是按理论上限排序。文本 `BASE_GOOD` 冻结后，
+多模态 vertical slice 与 MTP K=1 probe 可以在各自分支并行准备；服务器 replay 仍必须按
+全局 GPU 队列串行执行。MTP 不是独立计分项，若没有端到端净收益立即关闭。
 
 | 顺序 | 能力 | 直接收益与现实门槛 | 执行规则 |
 |---:|---|---|---|
 | 1 | BF16 paged KV + admission | 是 65K 和 C4/C8 的共同基础；32768 得 0 分，65536 约 3.33 分 | 先 BF16、再视余量 INT8；每级六类 6/6 + 128 + recovery |
 | 2 | C4 validity | 先拿 1 support 分，再争 goodput；复用 page allocator | 32/32、Jain/p95/health 全过后才记录 goodput |
-| 3 | 多模态 vertical slice | 10 分纯 correctness、无 latency ranking；合同已有 processor 类 | 文本 `BASE_GOOD` 冻结后由 GPU3 并行做 448x448 public 4/4；不得改 GPU0 主线，hidden 前重跑文本 smoke |
+| 3 | 多模态 vertical slice | 10 分纯 correctness、无 latency ranking；合同已有 processor 类 | 文本 `BASE_GOOD` 冻结后由 GPU3 logical lane 准备并排队 replay 448x448 public 4/4；不得改 GPU0 主线，hidden 前重跑文本 smoke |
 | 4 | MTP K=1 feasibility probe | 不是独立 bonus，但可能改善 base TPOT 和 C4/C8 goodput；需 exact verify/rollback，接受率可能不足 | target decoder 冻结后先做 K=1；off/on 端到端净收益才接入，否则立即关闭；不阻塞 C4 validity |
-| 5 | C8 | 额外 support 分和 goodput，但 p95/Jain 风险高于 C4 | 仅在 C4 稳定后开启；失败保留 C4；可与 GPU2 的 MTP probe 并行 |
+| 5 | C8 | 额外 support 分和 goodput，但 p95/Jain 风险高于 C4 | 仅在 C4 稳定后开启；失败保留 C4；与 GPU2 的 MTP probe 可并行准备，但 replay 服从队列 |
 | 6 | 131K / INT8 KV | 约 6.67 context 分，但显存和数值风险明显 | 65K 通过后再测；262016/INT4 不作为默认目标 |
 
-多模态可以在顺序上与 1--2 并行开发，但只能在文本基线冻结后接入；它的独立 bonus 不会改变 text eligibility 闸门。
+多模态可以在顺序上与 1--2 并行开发，但只能在文本基线冻结后接入；服务器验证按队列执行，
+它的独立 bonus 不会改变 text eligibility 闸门。
 
 ### 9.4 实验纪律
 
@@ -781,6 +802,6 @@ python3 benchmarks/qwen38_4090/evaluation/test.py run \
 
 ## 12. 最终建议
 
-最终建议不是在三条全栈架构之间重新选边：成员1固定维护**方案一：成熟算子混合主线**，以 BF16 scratch + cuBLASLt prefill、packed-W4 decode GEMV、逐 token eager GDN 资格路径、chunk-scan 性能路径、正确的 full-attention gate/partial RoPE 和 runtime 集成为主；成员2独立交付严格 protocol surface、7 项负控/合法请求/恢复证据；GPU2 只吸收方案二已证明的 decode GEMV/graph，GPU3 只吸收方案三已证明的 paged KV/C4/C8/MTP/vision 组件。这样保留三种技术路径的上限，同时把 correctness 风险集中在一个可回滚的 `BASE_GOOD` 上。
+最终建议不是在三条全栈架构之间重新选边：成员1固定维护**方案一：成熟算子混合主线**，以 BF16 scratch + cuBLASLt prefill、packed-W4 decode GEMV、逐 token eager GDN 资格路径、chunk-scan 性能路径、正确的 full-attention gate/partial RoPE 和 runtime 集成为主；成员2独立交付严格 protocol surface、malformed 加六项结构化负控/合法请求/恢复证据；GPU2 只吸收方案二已证明的 decode GEMV/graph，GPU3 只吸收方案三已证明的 paged KV/C4/C8/MTP/vision 组件。这样保留三种技术路径的上限，同时把 correctness 风险集中在一个可回滚的 `BASE_GOOD` 上。
 
 最终只提交有新鲜机器证据的能力声明：text eligibility 是硬门；context、C4/C8、multimodal、MTP 和 INT8/lm_head 等 bonus 各自 pass/0/unsupported。没有通过的 lane 不阻塞文本提交，也不能写入 `/health` 的 capability。

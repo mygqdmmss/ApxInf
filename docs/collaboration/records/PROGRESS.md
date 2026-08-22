@@ -1,6 +1,6 @@
 # 协作进度
 
-更新时间：2026-08-22
+更新时间：2026-08-23
 集成分支：APXinf-Contest-2026
 集成 owner：成员1
 
@@ -12,7 +12,8 @@
 | COLLAB-001 | 成员1 | 创建三人协作 spec、角色手册、Git/GPU 流程和模板 | done | local docs commit (HEAD) | 结构/链接/合同校验通过；`cargo check --workspace --locked` 通过；完整 cargo test 受既有 pi05_integrity_probe 默认 feature 问题阻塞，未修改源码 |
 | M1-R0 | 成员1 | 固定环境、模型、合同 hash，clean build baseline | planned | - | 记录 GPU0 UUID、driver/CUDA、test.py check |
 | M2-P0 | 成员2 | protocol stub、schema、/health、七项负控和恢复 gate | planned | - | 先在本地 fake runtime 完成逐项原始证据 |
-| M2-O0 | 成员2 | checkpoint manifest、oracle、hidden 代理集 | planned | - | 锁定 revision/tokenizer/generation config，输出 manifest |
+| M2-O0 | 成员2 + 成员1 | oracle generator、checkpoint manifest、选择性 layer golden、hidden 代理集 | planned | - | 成员2本地写 generator/schema；成员1在 GPU1 带锁执行真实 checkpoint；raw artifact 留共享路径，批准的最小 bundle 按 handoff 导出 |
+| M2-L0 | 成员2 | synthetic W4 pack/unpack fixture 与 loader 方向性测试 | planned | - | K-packed weight、K-group scale、N-packed zero-point；覆盖尾块、极值和 N/K 互换负断言 |
 | M1-R1 | 成员1 | runtime adapter、bounded GPU worker、device-budget admission | planned | - | 等 protocol adapter contract |
 | M1-C0 | 成员1 | Qwen35 loader/model/state/GDN/full-attention vertical slice | planned | - | 逐算子/逐层对拍后再接服务 |
 | M3-E0 | 成员3 | W4/GEMV/Graph baseline 与 paired benchmark harness | planned | - | 本地静态准备，服务器由成员1在 GPU2 replay |

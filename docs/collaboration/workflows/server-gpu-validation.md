@@ -38,6 +38,31 @@ nvidia-smi --query-compute-apps=pid,process_name,gpu_uuid --format=csv
 ss -ltnp | rg ':800[0-3]\\b' || true
 ~~~
 
+### 队列优先级与登记
+
+逻辑 GPU lane 只是记录目标 UUID；服务器一次只允许一个真实 GPU/model job。这里的
+“队列”是登记、优先级和人工重试协议，不是后台调度 daemon；拿不到锁的 job 必须退出并
+按优先级重新登记，不能绕过锁或占用另一张卡。成员1在取得锁前先登记一行 queue record：
+
+~~~text
+QUEUE_ID:
+PRIORITY: P0-oracle | P1-base | P2-kernel | P3-bonus
+SUBMITTED_AT_UTC:
+OWNER:
+COMMIT_SHA:
+MODEL_REVISION:
+TARGET_GPU_UUID:
+EXPECTED_MINUTES:
+ARTIFACT_DIR:
+DEPENDENCY_OR_EXIT_CONDITION:
+~~~
+
+优先级固定为 `P0 oracle`（成员2生成器的真实 checkpoint 选择性 golden）、`P1 base`
+（成员1 GPU0 runtime/protocol/correctness/reliability）、`P2 kernel`（成员3单变量
+paired profile）、`P3 bonus`（context/C4/C8/vision/MTP）。同一优先级按提交顺序执行；
+运行中的 job 不抢占。oracle 完成后释放 GPU1 logical lane，不能以“GPU1 空闲”为理由绕过
+全局锁。
+
 模型权重放在受控目录，不进 Git。raw artifact 放在：
 
 ~~~text
