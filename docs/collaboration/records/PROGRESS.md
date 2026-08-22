@@ -8,7 +8,7 @@
 
 | Task ID | Owner | Scope | Status | Latest SHA/PR | Evidence / next action |
 | --- | --- | --- | --- | --- | --- |
-| COLLAB-002 | 成员1 | 线下 agent prompt 决策、本地开发环境文档和进度写入边界 | done | `8dd45a71de9a86a8758c11f300235d4ec7adb300` | prompt 不入库；成员2/3 CPU-only 可启动，CUDA 为成员3可选；聚合 PROGRESS 由成员1维护 |
+| COLLAB-002 | 成员1 | 线下 agent prompt 决策、本地开发环境文档和进度写入边界 | done | `e3054497321249ea45308ff1f471e80faad0d35d` | prompt 不入库；成员2/3 CPU-only 可启动，CUDA 为成员3可选；聚合 PROGRESS 由成员1维护 |
 | COLLAB-001 | 成员1 | 创建三人协作 spec、角色手册、Git/GPU 流程和模板 | done | local docs commit (HEAD) | 结构/链接/合同校验通过；`cargo check --workspace --locked` 通过；完整 cargo test 受既有 pi05_integrity_probe 默认 feature 问题阻塞，未修改源码 |
 | M1-R0 | 成员1 | 固定环境、模型、合同 hash，clean build baseline | planned | - | 记录 GPU0 UUID、driver/CUDA、test.py check |
 | M2-P0 | 成员2 | protocol stub、schema、/health、七项负控和恢复 gate | planned | - | 先在本地 fake runtime 完成逐项原始证据 |
