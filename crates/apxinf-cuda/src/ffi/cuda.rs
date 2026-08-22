@@ -107,6 +107,7 @@ extern "C" {
     ) -> cudaError_t;
 
     pub fn cudaDeviceSynchronize() -> cudaError_t;
+    pub fn cudaMemGetInfo(free: *mut usize, total: *mut usize) -> cudaError_t;
 
     /// Explicit collection boundaries consumed by tools such as Nsight
     /// Systems when launched with `--capture-range=cudaProfilerApi`.
