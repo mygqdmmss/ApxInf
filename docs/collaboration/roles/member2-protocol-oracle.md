@@ -15,6 +15,7 @@
 - `APXINF_QWEN38_TECHNICAL_PLANS.md` 的 correctness/service 章节
 - `benchmarks/qwen38_4090/evaluation/run_evaluation.py`，重点 `protocol_checks` 约 `658-790` 行
 - `benchmarks/qwen38_4090/evaluation/score_submission.py`，重点 eligibility/reliability 约 `220-260` 行
+- `benchmarks/qwen38_4090/evaluation/contract-v1.json`
 - `benchmarks/qwen38_4090/evaluation/submission-schema-v1.json`
 - `benchmarks/qwen38_4090/evaluation/multimodal-contract-v1.json`
 - `crates/apxinf-loader/`、`src/main.rs`
@@ -23,7 +24,10 @@
 
 默认允许修改：
 
-- `src/server/**` 和 `src/bin/apxinf_protocol_stub.rs`；当前仓库没有 `src/server.rs`，不要直接改 `src/main.rs`，需要入口接线时在 PR 提出最小 Cargo/main diff，由成员1落地；
+- `src/server/**` 和 `src/bin/apxinf_protocol_stub.rs`；当前仓库没有 `src/server.rs`。
+  不要直接改 `src/main.rs`。如果 stub 需要 HTTP 依赖或 bin 声明，先在 task-spec/PR
+  提出最小 `Cargo.toml`/`Cargo.lock`/入口 diff；成员1确认后负责集成入口，成员2可在
+  自己分支验证该依赖；
 - `crates/apxinf-loader/**` 的 manifest、revision、shape、dtype、W4 metadata 校验和稳定 manifest API；成员1负责生产 runtime 消费该 API；
 - `tools/protocol/**` 或 `scripts/protocol/**` 的 stub、schema probe、负控和恢复测试；这些目录不存在时由首个任务创建并附 README；
 - `tools/oracle/**`、`python/oracle/**` 或同等隔离目录中的 reference/代理集生成器；
@@ -78,6 +82,9 @@
 - 每个失败保存最小复现请求和服务恢复结果。
 
 ## 本地开发与交付
+
+本地安装和 CPU-only/CUDA 边界见
+[local-development-environment.md](../local-development-environment.md)。
 
 本地先用 fake runtime/stub 做协议测试，不需要登录服务器。提交 PR 时必须附：
 

@@ -14,6 +14,10 @@
    - [成员1：服务器与最终集成](roles/member1-server-integrator.md)
    - [成员2：协议与 oracle](roles/member2-protocol-oracle.md)
    - [成员3：性能、算子与实验](roles/member3-performance-benchmark.md)
+6. [local-development-environment.md](local-development-environment.md)：成员2、成员3的本地开发环境、可选 CUDA 环境和验证边界。
+
+启动 prompt 不提交到仓库，由协调者根据角色手册和本地环境文档分别发送给三名
+agent。prompt 中的启动报告、首批任务和交付格式必须与本目录规范保持一致。
 
 ## 规范来源
 
@@ -37,6 +41,8 @@
 - 服务器：只有成员1默认登录和运行任务。成员2/3本地开发；需要 4090 证据时提交可复现命令，由成员1在服务器上代跑。
 - 集成分支：`APXinf-Contest-2026`，只由成员1合并通过 review 的 PR。
 - 正式 GPU：GPU0；GPU1-3只能作为开发/重放证据，不能替代 GPU0 正式成绩。
+- 成员2、成员3的日常进度写在各自 PR 或 task-specific progress log；聚合
+  records/PROGRESS.md 由成员1在合并和服务器 replay 后统一更新。
 
 ## 记录入口
 
@@ -52,7 +58,7 @@ git clone https://github.com/mygqdmmss/ApxInf.git
 cd ApxInf
 git switch -c feat/protocol-stub origin/APXinf-Contest-2026
 python3 benchmarks/qwen38_4090/evaluation/test.py check
-cargo test --workspace --locked
+cargo check --workspace --locked
 ```
 
 开发前先从 `task-spec.md` 建一个任务条目；完成后按 `pr-checklist.md` 生成 PR。不要把模型权重、评测生成物、日志、Nsight 文件或本地凭据提交到 Git。

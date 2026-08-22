@@ -52,9 +52,11 @@ rejected 必须指向回滚 SHA 或替代方案。
 
 ## 进度记录
 
-成员每天结束时更新自己的 PR 或 task 条目：完成项、下一步、阻塞、最新 SHA、最新
-artifact。成员1合并后更新 [PROGRESS.md](../records/PROGRESS.md) 的集成状态；成员3把
-每轮实验索引追加到 [EXPERIMENTS.md](../records/EXPERIMENTS.md)。
+成员2、成员3每天结束时更新自己的 PR 或 task-specific progress log：完成项、下一步、
+阻塞、最新 SHA、最新 artifact；不要并发修改聚合的
+[PROGRESS.md](../records/PROGRESS.md)。成员1合并后更新聚合进度、集成状态和服务器
+replay 结果；成员3仍把每轮实验索引追加到 [EXPERIMENTS.md](../records/EXPERIMENTS.md)，
+冲突时由成员1合并记录。
 
 ## 失败实验和事故
 

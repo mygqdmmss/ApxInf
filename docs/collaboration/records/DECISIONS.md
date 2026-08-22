@@ -13,6 +13,7 @@
 | D-009 | 2026-08-22 | `integrated` 是分层 PR 合入状态，`done/release` 才表示最终 eligibility/release gate 通过 | 协议 stub、loader 和实验 PR 必须能在真实 runtime 完成前独立合入 | 成员1 | accepted |
 | D-010 | 2026-08-22 | loader 解析/API 由成员2拥有，生产接线和 device-budget admission 由成员1拥有；协议 admission 与 runtime capacity admission 通过稳定接口交接 | 避免同一 server 入口和 loader 文件发生 owner 冲突 | 成员1 + 成员2 | accepted |
 | D-011 | 2026-08-22 | C4/C8 同时记录合同 1.5x TTFT guard 和当前 scorer 的 concurrency-scaled guard，候选采用更严格的 1.5x team policy | 冻结 contract 与 scorer 实现存在差异，不能修改 scorer 或混淆实验接收标准 | 成员1 + 成员3 | accepted |
+| D-012 | 2026-08-22 | 三名 agent 的启动 prompt 通过聊天线下发送，不提交仓库；本地开发环境和协作边界入库；成员2/3不并发写聚合 PROGRESS | prompt 含启动上下文但不应成为生产源码/合同的一部分；共享账号下并发修改聚合记录会制造冲突 | 成员1 | accepted |
 
 ## 新决策模板
 

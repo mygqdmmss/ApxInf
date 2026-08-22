@@ -8,6 +8,7 @@
 先读：
 
 - `docs/collaboration/README.md`
+- `docs/collaboration/local-development-environment.md`
 - `docs/collaboration/SPEC.md`
 - `docs/collaboration/workflows/git-pr-workflow.md`
 - `docs/collaboration/workflows/server-gpu-validation.md`
@@ -42,6 +43,10 @@
 共享文件改动必须在 PR 描述中列出接口影响；同一时间只允许一个分支修改 `qwen35` state machine。
 
 ## 工作分阶段
+
+成员1的日常代码在 `feat/qwen35-runtime` 或 `integrate/<pr-number>` 等隔离分支/
+review worktree 完成；`APXinf-Contest-2026` 只接受经过 review 的合并结果。若主工作树
+有未提交改动，不清理或覆盖它，先记录状态并使用 sibling worktree。
 
 ### R0：可复现基线
 

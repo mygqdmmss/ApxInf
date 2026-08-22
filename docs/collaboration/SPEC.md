@@ -124,7 +124,7 @@
 
 - 集成分支：`APXinf-Contest-2026`，只由成员1合并。
 - 成员2：计划创建 `feat/protocol-stub`、`feat/oracle-loader`。
-- 成员3：计划创建 `exp/w4-gemv`、`exp/graph-benchmark`、`exp/bonus-<name>`。
+- 成员3：计划创建 `exp/w4-gemv`、`exp/graph-benchmark`、`exp/bonus-context`（或同格式的具体 bonus 名称）。
 - 成员1：`feat/qwen35-runtime`、`integrate/<pr-number>`。
 - 禁止直接 push 集成分支；禁止 force-push 他人分支；PR 必须包含完整 commit SHA、测试命令、artifact 路径和回滚点。
 - 服务器验证用 `git worktree` 隔离，不在成员1主工作树中切换到远程分支。

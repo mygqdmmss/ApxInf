@@ -6,6 +6,7 @@
 ## 必读资料
 
 - `docs/collaboration/README.md`
+- `docs/collaboration/local-development-environment.md`
 - `docs/collaboration/SPEC.md`
 - `docs/collaboration/workflows/git-pr-workflow.md`
 - `docs/collaboration/workflows/server-gpu-validation.md`
@@ -74,6 +75,10 @@
 完整记录使用 [experiment-record.md](../templates/experiment-record.md)，索引追加到 [EXPERIMENTS.md](../records/EXPERIMENTS.md)。
 
 ## 本地与服务器协作
+
+本地安装和可选 CUDA 编译条件见
+[local-development-environment.md](../local-development-environment.md)。M3-E0 的
+harness、manifest、shape inventory 和静态检查不要求本地 NVIDIA GPU。
 
 本地可以完成脚本、shape、CPU/reference 和静态检查；非 RTX 4090 GPU 的结果只能作为开发信号。PR 中把服务器重放写成一条命令，成员1会在 GPU2/GPU3 逻辑 lane 上一次运行一个 job。只有 GPU0 重放的候选才可作为最终报告数字。
 
