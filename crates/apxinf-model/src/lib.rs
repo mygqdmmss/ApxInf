@@ -10,6 +10,8 @@ pub mod auto;
 pub mod profiling;
 pub mod pi05;
 pub mod qwen3vl;
+pub mod qwen35;
+pub mod runtime;
 pub mod vla;
 
 pub use builtin::register_builtin_models;
@@ -23,6 +25,11 @@ pub use auto::{AutoModel, LoadOptions, LoadedModel, ModelPrecision, SyntheticWei
 pub use profiling::GenerationProfile;
 pub use pi05::{Pi05Config, Pi05PerformanceProfile};
 pub use qwen3vl::{GeneralQwen3VL, Qwen3VLConfig, Qwen3VLTextWeights};
+pub use qwen35::{AdmissionError, Qwen35Config, IMAGE_TOKEN_ID, MODEL_VOCAB_SIZE};
+pub use runtime::{
+    AdmissionDecision, CancellationToken, RuntimeCapabilities, RuntimeError, RuntimeHandle,
+    RuntimeRequest, RuntimeResult, RuntimeTicket, RuntimeWorker,
+};
 pub use vla::{
     Action, ImageLayout, InferenceSpec, Observation, PreparedInference, VisionObservation,
     VlaRuntime,

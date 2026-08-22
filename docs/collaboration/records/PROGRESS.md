@@ -10,9 +10,9 @@
 | --- | --- | --- | --- | --- | --- |
 | COLLAB-002 | 成员1 | 线下 agent prompt 决策、本地开发环境文档和进度写入边界 | done | `e3054497321249ea45308ff1f471e80faad0d35d` | prompt 不入库；成员2/3 CPU-only 可启动，CUDA 为成员3可选；聚合 PROGRESS 由成员1维护 |
 | COLLAB-001 | 成员1 | 创建三人协作 spec、角色手册、Git/GPU 流程和模板 | done | local docs commit (HEAD) | 结构/链接/合同校验通过；`cargo check --workspace --locked` 通过；完整 cargo test 受既有 pi05_integrity_probe 默认 feature 问题阻塞，未修改源码 |
-| M1-R0 | 成员1 | 固定环境、模型、合同 hash，clean build baseline | planned | - | 记录 GPU0 UUID、driver/CUDA、test.py check |
+| M1-R0 | 成员1 | 固定环境、模型、合同 hash，clean build baseline | blocked | `d1d0b0aec2f9545eb0e2195e2e7ea0af1babbff1` | `test.py check`、`cargo check --workspace --locked` 通过；GPU/模型/合同已记录；`journalctl -k` 无 journal，R0 artifact `/mnt/chuangxin/team2/artifacts/apxinf/r0/d1d0b0aec2f9545eb0e2195e2e7ea0af1babbff1/`，environment SHA256 `7a7fab226351883b568af76771473095a6a2cef648490cf341fe57b747affa62`，command SHA256 `af29d9174a07a88b7f55550b99ab369f5fe0db53a5aa5811acda7846fba2534c` |
 | M2-P0 | 成员2 | protocol stub、schema、/health、七项负控和恢复 gate | planned | - | 先在本地 fake runtime 完成逐项原始证据 |
-| M2-O0 | 成员2 + 成员1 | oracle generator、checkpoint manifest、选择性 layer golden、hidden 代理集 | planned | - | 成员2本地写 generator/schema；成员1在 GPU1 带锁执行真实 checkpoint；raw artifact 留共享路径，批准的最小 bundle 按 handoff 导出 |
+| M2-O0 | 成员2 + 成员1 | oracle generator、checkpoint manifest、选择性 layer golden、hidden 代理集 | blocked | `d1d0b0aec2f9545eb0e2195e2e7ea0af1babbff1` | 未发现成员2 generator/schema/input selection/replay command handoff；未获取 `/tmp/apxinf-gpu-job.lock`，未运行 GPU1；收到完整 handoff 后按 P0 重排 |
 | M2-L0 | 成员2 | synthetic W4 pack/unpack fixture 与 loader 方向性测试 | planned | - | K-packed weight、K-group scale、N-packed zero-point；覆盖尾块、极值和 N/K 互换负断言 |
 | M1-R1 | 成员1 | runtime adapter、bounded GPU worker、device-budget admission | planned | - | 等 protocol adapter contract |
 | M1-C0 | 成员1 | Qwen35 loader/model/state/GDN/full-attention vertical slice | planned | - | 逐算子/逐层对拍后再接服务 |
