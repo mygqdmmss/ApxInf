@@ -69,6 +69,7 @@ impl Qwen35ModelConfig {
         if image_token_id != IMAGE_TOKEN_ID as u64 {
             return Err(Qwen35ConfigError::InvalidValue("image_token_id".into()));
         }
+        validate_quantization_config(&root)?;
         let text = root
             .get("text_config")
             .ok_or_else(|| Qwen35ConfigError::MissingField("text_config".into()))?;
@@ -175,6 +176,30 @@ fn required_f32(root: &serde_json::Value, name: &str) -> Result<f32, Qwen35Confi
 }
 fn required_bool(root: &serde_json::Value, name: &str) -> Result<bool, Qwen35ConfigError> {
     required(root, name)?.as_bool().ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
+}
+
+fn validate_quantization_config(root: &serde_json::Value) -> Result<(), Qwen35ConfigError> {
+    let quant = required(root, "quantization_config")?;
+    let format = required_str(quant, "format")?;
+    if format != "pack-quantized" {
+        return Err(Qwen35ConfigError::InvalidValue("quantization_config.format".into()));
+    }
+    let group = required(quant, "config_groups")?
+        .get("group_0")
+        .ok_or_else(|| Qwen35ConfigError::MissingField("quantization_config.config_groups.group_0".into()))?;
+    if required_str(group, "format")? != "pack-quantized" {
+        return Err(Qwen35ConfigError::InvalidValue("quantization_config.group_0.format".into()));
+    }
+    let weight = required(group, "weights")?;
+    if required_usize(weight, "group_size")? != 32
+        || required_usize(weight, "num_bits")? != 4
+        || required_bool(weight, "symmetric")?
+        || required_str(weight, "strategy")? != "group"
+        || required_str(weight, "type")? != "int"
+    {
+        return Err(Qwen35ConfigError::InvalidValue("quantization_config.weights".into()));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
