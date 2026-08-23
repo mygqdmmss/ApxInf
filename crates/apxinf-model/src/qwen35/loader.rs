@@ -6,7 +6,7 @@ use apxinf_loader::safetensors::{read_sharded_tensor_manifest, read_tensor_manif
 use apxinf_loader::{LoaderManifest, ManifestDType, LOADER_MANIFEST_SCHEMA, QWEN35_MODEL_REVISION};
 use thiserror::Error;
 
-use super::attention::PackedLinearReference;
+use super::attention::{FullAttentionReferenceConfig, FullAttentionReferenceLayer, PackedLinearReference};
 use super::config::{Qwen35ConfigError, Qwen35ModelConfig};
 use super::weights::{PackedLinearLayout, WeightLayoutError};
 
@@ -446,6 +446,71 @@ impl Qwen35CheckpointInventory {
         })
     }
 
+    /// Assemble one real full-attention reference layer from lazy checkpoint reads.
+    pub fn read_full_attention_layer(
+        &self,
+        layer_index: usize,
+    ) -> Result<FullAttentionReferenceLayer, Qwen35LoaderError> {
+        if self.config.layer_types.get(layer_index) != Some(&super::config::LayerType::FullAttention)
+        {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: format!("model.language_model.layers.{layer_index}"),
+                details: "requested layer is not full-attention".into(),
+            });
+        }
+        let prefix = format!("model.language_model.layers.{layer_index}");
+        let norm = |name: String, expected: usize| -> Result<Vec<f32>, Qwen35LoaderError> {
+            let values = self.read_tensor_bf16_f32(&name)?;
+            if values.len() != expected || values.iter().any(|value| !value.is_finite()) {
+                return Err(Qwen35LoaderError::ProjectionShape {
+                    base: prefix.clone(),
+                    details: format!("tensor `{name}` has invalid norm payload"),
+                });
+            }
+            Ok(values)
+        };
+        let input_norm = norm(
+            format!("{prefix}.input_layernorm.weight"),
+            self.config.hidden_size,
+        )?;
+        let q_norm = norm(
+            format!("{prefix}.self_attn.q_norm.weight"),
+            self.config.full_attention_head_dim,
+        )?;
+        let k_norm = norm(
+            format!("{prefix}.self_attn.k_norm.weight"),
+            self.config.full_attention_head_dim,
+        )?;
+        let post_attention_norm = norm(
+            format!("{prefix}.post_attention_layernorm.weight"),
+            self.config.hidden_size,
+        )?;
+        let packed = |name: &str| self.read_packed_linear(&format!("{prefix}.{name}"));
+        Ok(FullAttentionReferenceLayer {
+            config: FullAttentionReferenceConfig {
+                hidden_size: self.config.hidden_size,
+                intermediate_size: self.config.intermediate_size,
+                n_query_heads: self.config.full_attention_heads,
+                n_kv_heads: self.config.full_attention_kv_heads,
+                head_dim: self.config.full_attention_head_dim,
+                rotary_dim: self.config.partial_rotary_dim(),
+                rope_theta: 10_000.0,
+                rms_epsilon: self.config.rms_norm_eps,
+            },
+            input_norm,
+            q_norm,
+            k_norm,
+            post_attention_norm,
+            q_proj: packed("self_attn.q_proj")?,
+            k_proj: packed("self_attn.k_proj")?,
+            v_proj: packed("self_attn.v_proj")?,
+            o_proj: packed("self_attn.o_proj")?,
+            gate_proj: packed("mlp.gate_proj")?,
+            up_proj: packed("mlp.up_proj")?,
+            down_proj: packed("mlp.down_proj")?,
+        })
+    }
+
     fn tensor_manifest_or_projection(
         &self,
         base: &str,
@@ -762,6 +827,24 @@ mod tests {
         assert_eq!(projection.scales.len(), 10_240 * 160);
         assert_eq!(projection.zero_points.len(), 1_280 * 160);
         assert!(projection.scales.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    #[ignore = "requires the pinned Qwen3.5 checkpoint payload"]
+    fn real_checkpoint_assembles_full_attention_layer_three() {
+        let dir = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
+            .map(std::path::PathBuf::from)
+            .expect("APXINF_QWEN35_CHECKPOINT must point to the pinned checkpoint");
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&dir, QWEN35_MODEL_REVISION).unwrap();
+        let layer = inventory.read_full_attention_layer(3).unwrap();
+        assert_eq!(layer.config.hidden_size, 5_120);
+        assert_eq!(layer.config.n_query_heads, 24);
+        assert_eq!(layer.config.n_kv_heads, 4);
+        assert_eq!(layer.config.rotary_dim, 64);
+        assert_eq!(layer.q_proj.layout, PackedLinearLayout::new(12_288, 5_120, 32));
+        assert_eq!(layer.k_proj.layout, PackedLinearLayout::new(1_024, 5_120, 32));
+        assert_eq!(layer.o_proj.layout, PackedLinearLayout::new(5_120, 6_144, 32));
     }
 
     fn tiny_safetensors(name: &str, dtype: &str, shape: &[usize], payload: &[u8]) -> Vec<u8> {
