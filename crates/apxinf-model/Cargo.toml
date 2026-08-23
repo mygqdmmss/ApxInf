@@ -17,6 +17,9 @@ serde_json = "1"
 default = []
 cuda = ["dep:apxinf-cuda"]
 
+[dev-dependencies]
+tempfile = "3"
+
 [[example]]
 name = "pi05_bf16_tune"
 required-features = ["cuda"]
