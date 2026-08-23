@@ -192,10 +192,12 @@ def _register_hidden_hooks(model: Any, layer_indices: list[int]) -> tuple[dict[i
 
     def make_hook(index: int):
         def hook(_module: Any, _inputs: tuple[Any, ...], output: Any) -> None:
+            import torch
+
             tensor = output[0] if isinstance(output, tuple) else output
             if not hasattr(tensor, "shape"):
                 raise ValueError(f"layer {index} output is not a tensor")
-            captures[index].append(tensor.detach().to(dtype="float32").cpu())
+            captures[index].append(tensor.detach().to(dtype=torch.float32).cpu())
 
         return hook
 
