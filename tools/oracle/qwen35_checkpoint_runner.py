@@ -153,6 +153,23 @@ def _tensor_shape(tensor: Any) -> list[int]:
     return [int(value) for value in tensor.shape]
 
 
+def gdn_required_dimensions(model_meta: dict[str, Any]) -> dict[str, int]:
+    names = (
+        "linear_conv_kernel_dim",
+        "linear_key_head_dim",
+        "linear_num_key_heads",
+        "linear_num_value_heads",
+        "linear_value_head_dim",
+    )
+    dimensions = {}
+    for name in names:
+        value = model_meta.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"job model is missing positive GDN dimension {name}")
+        dimensions[name] = value
+    return dimensions
+
+
 def _capture_cache_tensor(cache: Any, layer_index: int, field: str) -> Any:
     layers = getattr(cache, "layers", None)
     if layers is None or layer_index >= len(layers):
@@ -217,6 +234,7 @@ def run_job() -> None:
     output_dir = Path(os.environ["APXINF_ORACLE_OUTPUT_DIR"]).resolve()
     job = _read_json(manifest_path)
     model_meta = job["model"]
+    gdn_dimensions = gdn_required_dimensions(model_meta)
     model_dir = Path(model_meta["model_dir"]).resolve()
     generation = _read_json(manifest_path.parent / "generation.json")
     selection = _read_json(manifest_path.parent / "selection.json")
@@ -335,13 +353,16 @@ def run_job() -> None:
     for name, (values, shape, schema_ref) in sorted(artifacts.items()):
         path = safe_artifact_path(output_dir, name)
         write_f32(path, values)
-        records.append({
+        record = {
             "file": name,
             "schema_ref": schema_ref,
             "dtype": "F32",
             "shape": shape,
             "sha256": sha256_file(path),
-        })
+        }
+        if schema_ref == "gdn_state":
+            record["required_dimensions"] = gdn_dimensions
+        records.append(record)
     if "tokens" in stages:
         token_path = safe_artifact_path(output_dir, "output-tokens.json")
         records.append({

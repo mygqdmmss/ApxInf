@@ -72,6 +72,27 @@ class RunnerUnitTests(unittest.TestCase):
             restore.assert_called_once_with(first, mock.sentinel.state)
             self.assertTrue(first.always_call)
 
+    def test_gdn_required_dimensions_are_copied_from_job_model(self):
+        self.assertIsNotNone(getattr(runner, "gdn_required_dimensions", None))
+        self.assertEqual(
+            runner.gdn_required_dimensions(
+                {
+                    "linear_conv_kernel_dim": 4,
+                    "linear_key_head_dim": 128,
+                    "linear_num_key_heads": 16,
+                    "linear_num_value_heads": 48,
+                    "linear_value_head_dim": 128,
+                }
+            ),
+            {
+                "linear_conv_kernel_dim": 4,
+                "linear_key_head_dim": 128,
+                "linear_num_key_heads": 16,
+                "linear_num_value_heads": 48,
+                "linear_value_head_dim": 128,
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
