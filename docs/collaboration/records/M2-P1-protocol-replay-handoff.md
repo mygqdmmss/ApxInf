@@ -31,7 +31,7 @@ recovery remain member1 responsibilities.
 
 ## Commit
 
-Complete implementation commit: `<filled after commit>`
+Complete implementation commit: `f98cb6ff7e96476c244b0e42db13600c2726520c`
 
 Parent integration baseline: `3139979882ffaa1feae34131f15d46a4d43e12ad`  
 Rollback commit: `3139979882ffaa1feae34131f15d46a4d43e12ad`
@@ -51,18 +51,34 @@ git diff --check
 git diff --exit-code HEAD -- benchmarks/qwen38_4090/evaluation
 ```
 
-Results are recorded at handoff time below after the commands complete. The
-stub replay itself was executed with:
+Results:
+
+- `cargo fmt --all -- --check`: blocked by pre-existing formatting drift in
+  committed, out-of-scope core/model/CUDA/main files; no prohibited file was
+  reformatted. `rustfmt --check src/server/conformance.rs src/server/mod.rs
+  src/server/service.rs` passed for every Rust file changed in this phase.
+- workspace `cargo check`: passed, warnings only.
+- workspace `cargo test`: blocked by the pre-existing default-feature build of
+  `crates/apxinf-model/examples/pi05_integrity_probe.rs`, which imports
+  CUDA-gated `apxinf_cuda`/pi05 APIs. The protocol binary's full local suite
+  passed: 38 passed, 0 failed.
+- protocol Python tests: 8 passed, 0 failed.
+- oracle Python tests: 21 passed, 0 failed.
+- evaluator assignment check: passed.
+- `git diff --check`: passed.
+- frozen evaluator diff check: passed, no changes.
+
+The stub replay itself was executed with:
 
 ```bash
 python3 tools/protocol/run_protocol_gates.py \
-  --base-url http://127.0.0.1:18011 \
+  --base-url http://127.0.0.1:18013 \
   --output docs/collaboration/records/M2-P1-stub-replay-evidence.json
 ```
 
 Stub replay: 10/10 gates passed.  
 Artifact: `docs/collaboration/records/M2-P1-stub-replay-evidence.json`  
-SHA256: `02925d4643322abfc9abd41c3d27dd3bd06cfe154c4ebe0d6fe6f82de9a8cd89`
+SHA256: `b71df6a884eba3950d11f12d6bf979a84eb7a079c112a23f856dd55605bc013e`
 
 ## Production Replay Template
 
