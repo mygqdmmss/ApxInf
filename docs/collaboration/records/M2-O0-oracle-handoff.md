@@ -94,20 +94,32 @@ it is not silently accepted as a new oracle.
 
 ## Member1 append-only server results
 
-The following fields are intentionally pending real execution:
+```text
+QUEUE_ID: P0-oracle-20260823T095000Z
+STARTED_AT_UTC: 2026-08-23T09:42:28Z
+ENDED_AT_UTC: 2026-08-23T09:46:34Z
+RUNNER_COMMIT_SHA: 46182a1167570e7595b3e658b02fb8acadac9f7a
+ACTUAL_GPU_UUID: GPU-343bc895-b011-22fa-4449-97207aa2bdec
+DRIVER_CUDA: NVIDIA driver 580.82.07; CUDA toolkit 12.8
+PEAK_VRAM_MIB: 20942 (two-second nvidia-smi sampling)
+COMMAND_OUTPUT_PATH: /mnt/chuangxin/team2/artifacts/apxinf/oracle/63768c10df38c0395e12ef49edac1bd539eaeeea/46182a1167570e7595b3e658b02fb8acadac9f7a/P0-oracle-20260823T095000Z.command.log
+RAW_ARTIFACT_FILE_LIST: artifact-manifest.json status complete; 19 declared files under artifacts/
+RAW_ARTIFACT_SHA256: artifact-manifest bbdf28c9fffe2e89fbf83a6a8d06aafd71d2a292a64a7444f07d3cf234c6cb75; artifact-report e8d0e98f7d80edd089262c387e89e98cc8e93e9a4a365c0baab83712708a9f4d; full list in manifest.sha256
+OUTPUT: 128 completion tokens; stop_reason budget; model token range validation passed
+APPROVED_MINIMAL_EXPORT: none exported; raw golden remains server-only pending an explicit remote-consumption request
+INCIDENT_OR_SUCCESS_STATUS: success; generator exit 0, GPU1 returned to 1 MiB, no compute process remained
+ROLLBACK_POINT: 097fe7252becef338da25585b2be571e98f6e8d9; omit --runner for manifest-only mode
+```
+
+Server artifact directory:
 
 ```text
-QUEUE_ID: pending member1
-STARTED_AT_UTC: pending member1
-ENDED_AT_UTC: pending member1
-ACTUAL_GPU_UUID: pending member1
-PEAK_VRAM_MIB: pending member1
-COMMAND_OUTPUT_PATH: pending member1
-RAW_ARTIFACT_FILE_LIST: pending member1
-RAW_ARTIFACT_SHA256: pending member1
-APPROVED_MINIMAL_EXPORT: pending member1 approval
-INCIDENT_OR_SUCCESS_STATUS: pending member1
+/mnt/chuangxin/team2/artifacts/apxinf/oracle/63768c10df38c0395e12ef49edac1bd539eaeeea/46182a1167570e7595b3e658b02fb8acadac9f7a/
 ```
+
+The original full-model decompression failure is preserved at
+`097fe7252becef338da25585b2be571e98f6e8d9.incident-first-forward-full-decompress-20260823T091804Z/`.
+Later runner/schema failures are preserved under their own commit-qualified incident directories and were not reused as golden evidence.
 
 No local result in this record is a real checkpoint correctness, GPU memory,
 hidden-case, reliability, or eligibility claim. The five reliability booleans
