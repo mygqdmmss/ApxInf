@@ -1,4 +1,5 @@
-use apxinf_core::{Device, DType, Shape, Tensor};
+use apxinf_core::Backend;
+use apxinf_core::{DType, Device, Shape, Tensor};
 use apxinf_cuda::kernels::qwen35_w4::{Qwen35W4DeviceProjection, Qwen35W4Layout};
 use apxinf_cuda::CudaContext;
 use half::bf16;
@@ -9,6 +10,167 @@ use super::loader::Qwen35CheckpointInventory;
 pub struct Qwen35CheckpointProjection {
     layout: Qwen35W4Layout,
     projection: Qwen35W4DeviceProjection,
+}
+
+/// Device-owned weights for one real full-attention layer.
+///
+/// The packed projections remain in their checkpoint layout on device. Norm
+/// vectors are uploaded as BF16 tensors without creating an expanded model
+/// copy. This is a weight bundle only; execution is added by the model owner.
+pub struct Qwen35CudaFullAttentionLayer {
+    layer_index: usize,
+    device_id: usize,
+    q_proj: Qwen35CheckpointProjection,
+    k_proj: Qwen35CheckpointProjection,
+    v_proj: Qwen35CheckpointProjection,
+    o_proj: Qwen35CheckpointProjection,
+    gate_proj: Qwen35CheckpointProjection,
+    up_proj: Qwen35CheckpointProjection,
+    down_proj: Qwen35CheckpointProjection,
+    input_norm: Tensor,
+    q_norm: Tensor,
+    k_norm: Tensor,
+    post_attention_norm: Tensor,
+}
+
+pub struct Qwen35AttentionProjectionTensors {
+    pub q_gate: Tensor,
+    pub k: Tensor,
+    pub v: Tensor,
+}
+
+impl Qwen35CudaFullAttentionLayer {
+    pub fn from_inventory(
+        ctx: &CudaContext,
+        inventory: &Qwen35CheckpointInventory,
+        layer_index: usize,
+    ) -> Result<Self, String> {
+        if inventory.config.layer_types.get(layer_index)
+            != Some(&super::config::LayerType::FullAttention)
+        {
+            return Err(format!("layer {layer_index} is not full-attention"));
+        }
+        let prefix = format!("model.language_model.layers.{layer_index}");
+        let projection = |name: &str| {
+            Qwen35CheckpointProjection::from_inventory(ctx, inventory, &format!("{prefix}.{name}"))
+        };
+        let norm = |name: &str, width: usize| -> Result<Tensor, String> {
+            let values = inventory
+                .read_tensor_bf16_values(&format!("{prefix}.{name}"))
+                .map_err(|error| error.to_string())?;
+            if values.len() != width {
+                return Err(format!(
+                    "{prefix}.{name} has {} values, expected {width}",
+                    values.len()
+                ));
+            }
+            let host = Tensor::from_bf16(Shape::new(vec![width]), &values)
+                .map_err(|error| error.to_string())?;
+            apxinf_cuda::transfers::to_cuda(&host, ctx.device_id())
+                .map_err(|error| error.to_string())
+        };
+
+        Ok(Self {
+            layer_index,
+            device_id: ctx.device_id(),
+            q_proj: projection("self_attn.q_proj")?,
+            k_proj: projection("self_attn.k_proj")?,
+            v_proj: projection("self_attn.v_proj")?,
+            o_proj: projection("self_attn.o_proj")?,
+            gate_proj: projection("mlp.gate_proj")?,
+            up_proj: projection("mlp.up_proj")?,
+            down_proj: projection("mlp.down_proj")?,
+            input_norm: norm("input_layernorm.weight", inventory.config.hidden_size)?,
+            q_norm: norm(
+                "self_attn.q_norm.weight",
+                inventory.config.full_attention_head_dim,
+            )?,
+            k_norm: norm(
+                "self_attn.k_norm.weight",
+                inventory.config.full_attention_head_dim,
+            )?,
+            post_attention_norm: norm(
+                "post_attention_layernorm.weight",
+                inventory.config.hidden_size,
+            )?,
+        })
+    }
+
+    pub const fn layer_index(&self) -> usize {
+        self.layer_index
+    }
+    pub const fn device_id(&self) -> usize {
+        self.device_id
+    }
+    pub const fn q_layout(&self) -> Qwen35W4Layout {
+        self.q_proj.layout
+    }
+    pub const fn k_layout(&self) -> Qwen35W4Layout {
+        self.k_proj.layout
+    }
+    pub const fn v_layout(&self) -> Qwen35W4Layout {
+        self.v_proj.layout
+    }
+    pub const fn o_layout(&self) -> Qwen35W4Layout {
+        self.o_proj.layout
+    }
+    pub const fn gate_layout(&self) -> Qwen35W4Layout {
+        self.gate_proj.layout
+    }
+    pub const fn up_layout(&self) -> Qwen35W4Layout {
+        self.up_proj.layout
+    }
+    pub const fn down_layout(&self) -> Qwen35W4Layout {
+        self.down_proj.layout
+    }
+    pub fn norm_shapes(&self) -> [[usize; 1]; 4] {
+        [
+            [self.input_norm.shape().dims()[0]],
+            [self.q_norm.shape().dims()[0]],
+            [self.k_norm.shape().dims()[0]],
+            [self.post_attention_norm.shape().dims()[0]],
+        ]
+    }
+
+    /// Run the real layer-3 input normalization and packed q/k/v projections.
+    /// The result stays on the selected CUDA device and preserves the q/gate
+    /// concatenation emitted by the checkpoint's q projection.
+    pub fn project_attention_inputs(
+        &self,
+        backend: &apxinf_cuda::CudaBackend,
+        hidden: &Tensor,
+    ) -> Result<Qwen35AttentionProjectionTensors, String> {
+        if hidden.device() != Device::Cuda(self.device_id)
+            || hidden.dtype() != DType::BF16
+            || hidden.shape().dims().len() != 2
+            || hidden.shape().dims()[1] != self.q_layout().in_features
+        {
+            return Err(format!(
+                "full-attention hidden must be CUDA BF16 [rows, {}], got {:?} {} on {:?}",
+                self.q_layout().in_features,
+                hidden.shape().dims(),
+                hidden.dtype(),
+                hidden.device()
+            ));
+        }
+        let normalized = backend
+            .rms_norm(hidden, &self.input_norm, 1e-6)
+            .map_err(|error| error.to_string())?;
+        Ok(Qwen35AttentionProjectionTensors {
+            q_gate: self
+                .q_proj
+                .project(backend.context(), &normalized)
+                .map_err(|error| error.to_string())?,
+            k: self
+                .k_proj
+                .project(backend.context(), &normalized)
+                .map_err(|error| error.to_string())?,
+            v: self
+                .v_proj
+                .project(backend.context(), &normalized)
+                .map_err(|error| error.to_string())?,
+        })
+    }
 }
 
 impl Qwen35CheckpointProjection {
@@ -86,10 +248,9 @@ impl Qwen35CheckpointProjection {
                 "Qwen3.5 projection returned an invalid output tensor".into(),
             ));
         }
-        let bytes = output
-            .storage()
-            .as_cpu()
-            .ok_or_else(|| apxinf_core::Error::Other("projection output is not CPU storage".into()))?;
+        let bytes = output.storage().as_cpu().ok_or_else(|| {
+            apxinf_core::Error::Other("projection output is not CPU storage".into())
+        })?;
         Ok(bytes
             .chunks_exact(2)
             .map(|chunk| bf16::from_bits(u16::from_le_bytes([chunk[0], chunk[1]])).to_f32())
@@ -104,6 +265,78 @@ mod tests {
 
     #[test]
     #[ignore = "requires GPU2 and the pinned Qwen3.5 checkpoint payload"]
+    fn real_full_attention_layer_three_owns_all_checkpoint_weights_on_cuda() {
+        let checkpoint = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
+            .map(std::path::PathBuf::from)
+            .expect("APXINF_QWEN35_CHECKPOINT must point to the pinned checkpoint");
+        let device = std::env::var("APXINF_CUDA_DEVICE")
+            .expect("APXINF_CUDA_DEVICE must select a non-formal development GPU")
+            .parse::<usize>()
+            .unwrap();
+        let ctx = CudaContext::new(device).expect("CUDA device required");
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&checkpoint, QWEN35_MODEL_REVISION)
+                .unwrap();
+
+        let layer = Qwen35CudaFullAttentionLayer::from_inventory(&ctx, &inventory, 3).unwrap();
+
+        assert_eq!(layer.layer_index(), 3);
+        assert_eq!(layer.device_id(), device);
+        assert_eq!(layer.q_layout().in_features, 5120);
+        assert_eq!(layer.q_layout().out_features, 12288);
+        assert_eq!(layer.k_layout().out_features, 1024);
+        assert_eq!(layer.v_layout().out_features, 1024);
+        assert_eq!(layer.o_layout().out_features, 5120);
+        assert_eq!(layer.gate_layout().out_features, 17408);
+        assert_eq!(layer.up_layout().out_features, 17408);
+        assert_eq!(layer.down_layout().out_features, 5120);
+        assert_eq!(layer.norm_shapes(), [[5120], [256], [256], [5120]]);
+    }
+
+    #[test]
+    #[ignore = "requires GPU2 and the pinned Qwen3.5 checkpoint payload"]
+    fn real_full_attention_layer_three_projects_cuda_qkv_from_oracle_embedding() {
+        let checkpoint = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
+            .map(std::path::PathBuf::from)
+            .expect("APXINF_QWEN35_CHECKPOINT must point to the pinned checkpoint");
+        let device = std::env::var("APXINF_CUDA_DEVICE")
+            .expect("APXINF_CUDA_DEVICE must select a non-formal development GPU")
+            .parse::<usize>()
+            .unwrap();
+        let ctx = CudaContext::new(device).expect("CUDA device required");
+        let backend = apxinf_cuda::CudaBackend::new(device).expect("CUDA backend required");
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&checkpoint, QWEN35_MODEL_REVISION)
+                .unwrap();
+        let layer = Qwen35CudaFullAttentionLayer::from_inventory(&ctx, &inventory, 3).unwrap();
+        let oracle = std::path::PathBuf::from(
+            "/mnt/chuangxin/team2/artifacts/apxinf/oracle/63768c10df38c0395e12ef49edac1bd539eaeeea/46182a1167570e7595b3e658b02fb8acadac9f7a/artifacts/embedding.f32.bin",
+        );
+        let bytes = std::fs::read(oracle).unwrap();
+        let values = bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let host = Tensor::from_bf16(
+            Shape::new(vec![8, 5120]),
+            &values
+                .iter()
+                .copied()
+                .map(half::bf16::from_f32)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let hidden = apxinf_cuda::transfers::to_cuda(&host, device).unwrap();
+        let projected = layer.project_attention_inputs(&backend, &hidden).unwrap();
+        assert_eq!(projected.q_gate.shape().dims(), &[8, 12288]);
+        assert_eq!(projected.k.shape().dims(), &[8, 1024]);
+        assert_eq!(projected.v.shape().dims(), &[8, 1024]);
+        assert_eq!(projected.q_gate.device(), Device::Cuda(device));
+        assert!(apxinf_cuda::transfers::to_cpu(&projected.q_gate).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires GPU2 and the pinned Qwen3.5 checkpoint payload"]
     fn real_layer_zero_projection_matches_cpu_for_selected_outputs() {
         let checkpoint = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
             .map(std::path::PathBuf::from)
@@ -113,14 +346,12 @@ mod tests {
             .parse::<usize>()
             .unwrap();
         let ctx = CudaContext::new(device).expect("CUDA device required");
-        let inventory = Qwen35CheckpointInventory::from_checkpoint_dir(
-            &checkpoint,
-            QWEN35_MODEL_REVISION,
-        )
-        .unwrap();
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&checkpoint, QWEN35_MODEL_REVISION)
+                .unwrap();
         let base = "model.language_model.layers.0.linear_attn.in_proj_qkv";
-        let projection = Qwen35CheckpointProjection::from_inventory(&ctx, &inventory, base)
-            .unwrap();
+        let projection =
+            Qwen35CheckpointProjection::from_inventory(&ctx, &inventory, base).unwrap();
         let host = inventory.read_packed_linear(base).unwrap();
         let activation = (0..host.layout.in_features)
             .map(|index| (index as f32 * 0.00031).sin() * 0.02)
@@ -146,7 +377,10 @@ mod tests {
                 .sum::<f32>();
             let expected = bf16::from_f32(expected).to_f32();
             let delta = (output[out] - expected).abs();
-            assert!(delta <= 0.02 * expected.abs().max(1.0), "out={out} delta={delta}");
+            assert!(
+                delta <= 0.02 * expected.abs().max(1.0),
+                "out={out} delta={delta}"
+            );
         }
     }
 }

@@ -6,7 +6,9 @@ use apxinf_loader::safetensors::{read_sharded_tensor_manifest, read_tensor_manif
 use apxinf_loader::{LoaderManifest, ManifestDType, LOADER_MANIFEST_SCHEMA, QWEN35_MODEL_REVISION};
 use thiserror::Error;
 
-use super::attention::{FullAttentionReferenceConfig, FullAttentionReferenceLayer, PackedLinearReference};
+use super::attention::{
+    FullAttentionReferenceConfig, FullAttentionReferenceLayer, PackedLinearReference,
+};
 use super::config::{Qwen35ConfigError, Qwen35ModelConfig};
 use super::weights::{PackedLinearLayout, WeightLayoutError};
 
@@ -315,6 +317,30 @@ impl Qwen35CheckpointInventory {
             .collect())
     }
 
+    /// Read one BF16 tensor while preserving its native storage representation.
+    pub fn read_tensor_bf16_values(
+        &self,
+        name: &str,
+    ) -> Result<Vec<half::bf16>, Qwen35LoaderError> {
+        let manifest = self.tensor_manifest(name)?;
+        if manifest.dtype != ManifestDType::BF16 {
+            return Err(Qwen35LoaderError::UnsupportedDType {
+                name: name.to_owned(),
+                dtype: manifest.dtype.clone(),
+            });
+        }
+        let bytes = self.read_tensor_bytes(name)?;
+        if bytes.len() % 2 != 0 {
+            return Err(Qwen35LoaderError::Inventory(format!(
+                "BF16 tensor `{name}` byte length is not divisible by 2"
+            )));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|chunk| half::bf16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())))
+            .collect())
+    }
+
     /// Read one asymmetric W4 projection without materializing any other tensor.
     pub fn read_packed_linear(
         &self,
@@ -451,7 +477,8 @@ impl Qwen35CheckpointInventory {
         &self,
         layer_index: usize,
     ) -> Result<FullAttentionReferenceLayer, Qwen35LoaderError> {
-        if self.config.layer_types.get(layer_index) != Some(&super::config::LayerType::FullAttention)
+        if self.config.layer_types.get(layer_index)
+            != Some(&super::config::LayerType::FullAttention)
         {
             return Err(Qwen35LoaderError::ProjectionShape {
                 base: format!("model.language_model.layers.{layer_index}"),
@@ -842,9 +869,18 @@ mod tests {
         assert_eq!(layer.config.n_query_heads, 24);
         assert_eq!(layer.config.n_kv_heads, 4);
         assert_eq!(layer.config.rotary_dim, 64);
-        assert_eq!(layer.q_proj.layout, PackedLinearLayout::new(12_288, 5_120, 32));
-        assert_eq!(layer.k_proj.layout, PackedLinearLayout::new(1_024, 5_120, 32));
-        assert_eq!(layer.o_proj.layout, PackedLinearLayout::new(5_120, 6_144, 32));
+        assert_eq!(
+            layer.q_proj.layout,
+            PackedLinearLayout::new(12_288, 5_120, 32)
+        );
+        assert_eq!(
+            layer.k_proj.layout,
+            PackedLinearLayout::new(1_024, 5_120, 32)
+        );
+        assert_eq!(
+            layer.o_proj.layout,
+            PackedLinearLayout::new(5_120, 6_144, 32)
+        );
     }
 
     fn tiny_safetensors(name: &str, dtype: &str, shape: &[usize], payload: &[u8]) -> Vec<u8> {
