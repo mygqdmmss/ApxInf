@@ -5,6 +5,8 @@ pub mod gdn;
 pub mod loader;
 pub mod model;
 pub mod weights;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 
 pub use admission::{
     validate_input_ids, validate_input_ids_with_vocab, validate_total_budget, AdmissionError,
