@@ -4,8 +4,10 @@ Date: 2026-08-23
 Owner: member2 / protocol-oracle
 Branch: `feat/oracle-loader`
 Loader commits: `8e5c1cc496c96a2423caa82a99128bb278e8aa65`,
-`a5cf465` (manifest identity fail-closed follow-up)
-Rollback: `git revert a5cf465 8e5c1cc496c96a2423caa82a99128bb278e8aa65`
+`a5cf465c159cfc6b860c43301d38b0292896ba51`, and final hardening
+`a52f7ef79546f460b17c932cc658dc01215703cb` (manifest roles, inventory bridge,
+shard symlink/extra rejection, and production sharded parity).
+Rollback order: revert `a52f7ef`, then `a5cf465`, then `8e5c1cc`
 
 ## Scope and local boundary
 
@@ -49,20 +51,26 @@ direction, wrong shape, dtype, or group size with tensor-specific errors.
 - header-only inventory: a SafeTensors file truncated immediately after its
   JSON header still yields sorted shape/dtype metadata, proving payload bytes
   are not read;
-- sharded inventory: unsafe paths, missing entries, duplicate names, wrong
-  shard assignment, and unindexed tensor names are rejected.
+- sharded inventory: unsafe paths, shard symlinks, missing entries, duplicate
+  names, wrong shard assignment, and unindexed tensor names are rejected by
+  both header-only and production sharded readers;
+- header inventory bridge: `build_qwen35_w4_layer_manifest()` normalizes one
+  layer prefix, attaches packed/scale/zero-point roles and N/K/group metadata,
+  then runs the same frozen identity/W4 gate.
 
-Synthetic fixture source SHA256:
-`6a390cb8604c90b9daee0da6e3b81d67c134ea5d40e3b8b96d50bcfdf6c27992`
+Synthetic fixture source SHA256 (`crates/apxinf-loader/src/w4.rs`):
+`ff07de2815400baa9c3e6ba267de807bffb979b2ec6da608a8a6ae1a6a94b5f6`.
+Historical fixture bundle identity retained from the initial evidence run:
+`6a390cb8604c90b9daee0da6e3b81d67c134ea5d40e3b8b96d50bcfdf6c27992`.
 
 ## Raw local commands and results
 
 ```text
 CARGO_TARGET_DIR=<fresh /tmp target> cargo test -p apxinf-loader --locked -- --nocapture
-result: PASS; 23 passed, 0 failed; doc tests 0 failed
+result: PASS; 26 passed, 0 failed; doc tests 0 failed
 
 python3 -m unittest tools.oracle.test_generate_golden -v
-result: PASS; 10 passed, 0 failed
+result: PASS; 15 passed, 0 failed
 
 python3 -m py_compile tools/oracle/generate_golden.py tools/oracle/test_generate_golden.py
 result: PASS
@@ -75,7 +83,16 @@ result: PASS at evidence preparation time
 ```
 
 Observed warnings were pre-existing dead-code warnings in `apxinf-core` and
-`gguf.rs`; no loader test failed.
+`gguf.rs`; no loader test failed. The 26 passing tests include the role/axis
+bridge and production sharded-reader parity checks in addition to the original
+header-only and synthetic W4 cases.
+
+Final loader source hashes used for review:
+
+- schema identity: `apxinf.loader-manifest.v1`, model revision
+  `63768c10df38c0395e12ef49edac1bd539eaeeea`, model vocab `248320`;
+- W4 fixture source (`crates/apxinf-loader/src/w4.rs`):
+  `ff07de2815400baa9c3e6ba267de807bffb979b2ec6da608a8a6ae1a6a94b5f6`.
 
 ## Interface for member1
 

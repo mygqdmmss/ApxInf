@@ -195,10 +195,10 @@ The required inventory is validated exactly:
 | --- | --- | --- | --- |
 | `k_proj.weight_packed` | `[1024,640]` | I32 | K packed |
 | `k_proj.weight_scale` | `[1024,160]` | BF16 | K group-32 |
-| `k_proj.weight_zero_point` | `[128,160]` | I32 | N packed |
+| `k_proj.weight_zero_point` | `[128,160]` | I32 | N group-32 |
 | `down_proj.weight_packed` | `[5120,2176]` | I32 | K packed |
 | `down_proj.weight_scale` | `[5120,544]` | BF16 | K group-32 |
-| `down_proj.weight_zero_point` | `[640,544]` | I32 | N packed |
+| `down_proj.weight_zero_point` | `[640,544]` | I32 | N group-32 |
 
 Tests declare these production shapes without allocating their full buffers.
 Compact synthetic vectors exercise nibble values 0 and 15, K group boundaries,
@@ -228,11 +228,13 @@ The generator writes canonical JSON for:
 Manifest-only mode prepares a reproducible job bundle without claiming real
 golden outputs. Server execution mode delegates checkpoint-specific inference
 to an explicit runner command, validates its output against the same schema,
-and hashes every produced artifact. The artifact identity is the generator
-SHA, model revision, input-manifest SHA, layer/stage selection, and schema
-version. Unchanged identities reuse existing server artifacts. The generator
-records its own source SHA when invoked from a Git checkout and fails closed if
-the requested revision is empty or the model directory does not exist.
+and hashes every produced artifact. The artifact identity binds the generator
+source SHA, contract SHA, config and generation-config SHA256 values, model
+revision, input-manifest SHA, layer/stage selection, generation parameters,
+and schema version. Unchanged identities reuse existing server artifacts. The
+generator records its own source SHA when invoked from a Git checkout and fails
+closed if the requested revision is empty or the model directory does not
+exist.
 
 ### Oracle and Loader Self-Review Corrections
 
@@ -248,10 +250,15 @@ explicit:
   for `linear_attention` layers, and KV state only for `full_attention` layers;
 - runner execution is shell-free and isolated to `artifacts/`. It fails on
   missing/extra files, directories, symlinks, control-manifest mutation,
-  schema/dtype/shape/hash mismatch, invalid token IDs, or nonzero exit before
-  marking any artifact complete;
+  symbolic-shape mismatch, non-finite F32, invalid EOS/stop metadata, model
+  metadata drift, schema/dtype/shape/hash mismatch, invalid token IDs, or
+  nonzero exit before marking any artifact complete;
 - header-only sharded SafeTensors inventory verifies exact index-to-shard
-  ownership and rejects unindexed tensors rather than silently dropping them;
+  ownership, rejects shard symlinks, and rejects unindexed tensors rather than
+  silently dropping them; production sharded loading has the same behavior;
+- loader manifests freeze schema/revision and carry quantization role metadata;
+  `build_qwen35_w4_layer_manifest()` is the bridge from header inventory to the
+  W4 direction gate;
 - synthetic W4 dequantization rejects both weight and zero-point nibbles outside
   `0..=15`.
 
