@@ -220,7 +220,7 @@ The generator writes canonical JSON for:
 
 - checkpoint and input identity;
 - selected layers and stages;
-- reference input/output token IDs and decoded-text fields;
+- reference input token IDs plus pending output-token and decoded-text schemas;
 - hidden, recurrent state, KV, and logit artifact schemas;
 - generation parameters, EOS policy, dtype/shape metadata, and tolerances;
 - expected artifact filenames and SHA256 values.
@@ -233,6 +233,31 @@ SHA, model revision, input-manifest SHA, layer/stage selection, and schema
 version. Unchanged identities reuse existing server artifacts. The generator
 records its own source SHA when invoked from a Git checkout and fails closed if
 the requested revision is empty or the model directory does not exist.
+
+### Oracle and Loader Self-Review Corrections
+
+The 2026-08-23 loader/oracle implementation review made these invariants
+explicit:
+
+- manifest-only output declares every golden artifact as `pending`; it contains
+  input token IDs and an output-token schema, but no reference output IDs,
+  decoded text, hidden/state/logit values, or completed artifact hashes;
+- the generator accepts only the frozen model revision, config vocabulary
+  `248320`, EOS list `[248046,248044]`, and a 64-entry Qwen3.5 layer-type map;
+- `--layers` without `--stages` means `layer_hidden`. GDN state is emitted only
+  for `linear_attention` layers, and KV state only for `full_attention` layers;
+- runner execution is shell-free and isolated to `artifacts/`. It fails on
+  missing/extra files, directories, symlinks, control-manifest mutation,
+  schema/dtype/shape/hash mismatch, invalid token IDs, or nonzero exit before
+  marking any artifact complete;
+- header-only sharded SafeTensors inventory verifies exact index-to-shard
+  ownership and rejects unindexed tensors rather than silently dropping them;
+- synthetic W4 dequantization rejects both weight and zero-point nibbles outside
+  `0..=15`.
+
+These checks remain metadata-only and synthetic locally. They do not assert
+that the member1 checkpoint runner is implemented, that the real oracle has
+run, or that any scorer reliability boolean is true.
 
 Member1 executes the real job under the global lock on GPU1 and records GPU
 UUID, peak VRAM, command, raw artifact path, exported file list, and hashes

@@ -8,6 +8,13 @@
 
 **Tech Stack:** Rust 2021, serde/serde_json, existing loader dependencies, Python 3 standard library, Cargo and unittest.
 
+**Execution status (2026-08-23):** Tasks 1-6 implemented in
+`8e5c1cc496c96a2423caa82a99128bb278e8aa65`,
+`7e26b944c06e4953480b445b3746e854aa32d527`, and `a5cf465`.
+Task 7 local evidence and GPU1 handoff are complete in the accompanying
+records; real checkpoint execution, GPU UUID observation, VRAM measurement,
+and golden artifact hashes remain append-only member1 server work.
+
 ---
 
 ### Task 1: Loader Manifest
