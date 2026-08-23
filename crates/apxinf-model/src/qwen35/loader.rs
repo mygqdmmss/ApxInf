@@ -207,4 +207,9 @@ mod tests {
         manifest.tensors[0].dtype = ManifestDType::Other("U4".into());
         assert!(matches!(Qwen35CheckpointInventory::from_manifest(&config(), manifest), Err(Qwen35LoaderError::UnsupportedDType { .. })));
     }
+
+    #[test]
+    fn inventory_digest_uses_standard_sha256() {
+        assert_eq!(hex_sha256(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
 }
