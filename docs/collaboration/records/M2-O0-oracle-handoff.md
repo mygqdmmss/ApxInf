@@ -103,7 +103,7 @@ ACTUAL_GPU_UUID: GPU-343bc895-b011-22fa-4449-97207aa2bdec
 DRIVER_CUDA: NVIDIA driver 580.82.07; CUDA toolkit 12.8
 PEAK_VRAM_MIB: 20942 (two-second nvidia-smi sampling)
 COMMAND_OUTPUT_PATH: /mnt/chuangxin/team2/artifacts/apxinf/oracle/63768c10df38c0395e12ef49edac1bd539eaeeea/46182a1167570e7595b3e658b02fb8acadac9f7a/P0-oracle-20260823T095000Z.command.log
-RAW_ARTIFACT_FILE_LIST: artifact-manifest.json status complete; 19 declared files under artifacts/
+RAW_ARTIFACT_FILE_LIST: artifact-manifest.json status complete; 18 declared payload files plus artifact-report.json under artifacts/
 RAW_ARTIFACT_SHA256: artifact-manifest bbdf28c9fffe2e89fbf83a6a8d06aafd71d2a292a64a7444f07d3cf234c6cb75; artifact-report e8d0e98f7d80edd089262c387e89e98cc8e93e9a4a365c0baab83712708a9f4d; full list in manifest.sha256
 OUTPUT: 128 completion tokens; stop_reason budget; model token range validation passed
 APPROVED_MINIMAL_EXPORT: none exported; raw golden remains server-only pending an explicit remote-consumption request
