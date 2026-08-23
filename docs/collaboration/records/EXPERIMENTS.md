@@ -4,7 +4,7 @@
 
 | Experiment ID | Owner | Candidate | Fixed commit | GPU UUID | Status | Result/artifact |
 | --- | --- | --- | --- | --- | --- | --- |
-| - | - | 尚未开始 | - | - | planned | - |
+| M3-E0-W4-GEMV-001 | member3 | packed-W4 decode GEMV scaffolding | `81dad4753f2aa72b77f8deddbe7fb290b3d1789e` | pending RTX 4090 replay | planned | `benchmarks/campaign/manifests/w4-gemv-baseline.json` |
 
 ## 记录要求
 
