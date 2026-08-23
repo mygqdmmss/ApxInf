@@ -24,6 +24,8 @@ pub enum WeightLayoutError {
     ActivationLength { expected: usize, got: usize },
     #[error("weight buffers have inconsistent lengths")]
     BufferLength,
+    #[error("scale at index {index} is not finite")]
+    NonFiniteScale { index: usize },
 }
 
 impl PackedLinearLayout {
@@ -123,6 +125,9 @@ impl PackedLinearLayout {
         {
             return Err(WeightLayoutError::BufferLength);
         }
+        if let Some(index) = scales.iter().position(|scale| !scale.is_finite()) {
+            return Err(WeightLayoutError::NonFiniteScale { index });
+        }
         let mut output = vec![0.0; self.out_features];
         for (out, result) in output.iter_mut().enumerate() {
             let mut sum = 0.0f32;
@@ -207,6 +212,10 @@ mod tests {
         assert!(matches!(
             layout.matvec_f32(&[0], &[1.0; 4], &[0; 1], &[1.0; 8]),
             Err(WeightLayoutError::BufferLength)
+        ));
+        assert!(matches!(
+            layout.matvec_f32(&[0; 2], &[f32::NAN; 4], &[0; 2], &[1.0; 8]),
+            Err(WeightLayoutError::NonFiniteScale { .. })
         ));
     }
 }
