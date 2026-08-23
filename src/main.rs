@@ -8,6 +8,19 @@ use apxinf_core::{DType, Device, Tensor};
 use apxinf_model::{AutoModel, ImageInput, LlmInput, LoadOptions};
 use apxinf_tokenizer::{Tokenizer, ChatMessage};
 
+#[path = "server/mod.rs"]
+mod server;
+
+#[derive(Debug, Clone)]
+struct ServeArgs {
+    model: PathBuf,
+    revision: String,
+    gpu_uuid: String,
+    bind: std::net::SocketAddr,
+    max_model_len: usize,
+    queue_capacity: usize,
+}
+
 #[derive(Parser)]
 #[command(name = "apxinf")]
 #[command(about = "LLM inference engine", long_about = None)]
@@ -58,6 +71,22 @@ enum Commands {
 
     /// Run a quick test of the engine
     Test,
+
+    /// Start the strict Qwen3.5 evaluator server.
+    Serve {
+        #[arg(long)]
+        model: PathBuf,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        gpu_uuid: String,
+        #[arg(long, default_value = "127.0.0.1:8000")]
+        bind: std::net::SocketAddr,
+        #[arg(long)]
+        max_model_len: usize,
+        #[arg(long, default_value_t = 1)]
+        queue_capacity: usize,
+    },
 }
 
 fn main() {
@@ -85,7 +114,79 @@ fn main() {
         Commands::Test => {
             run_test();
         }
+        Commands::Serve { model, revision, gpu_uuid, bind, max_model_len, queue_capacity } => {
+            let args = ServeArgs {
+                model,
+                revision,
+                gpu_uuid,
+                bind,
+                max_model_len,
+                queue_capacity,
+            };
+            if let Err(error) = run_serve(args) {
+                eprintln!("serve failed: {error}");
+                std::process::exit(2);
+            }
+        }
     }
+}
+
+fn validate_serve_args(args: &ServeArgs) -> Result<(), String> {
+    if !args.model.is_dir() {
+        return Err(format!("--model is not a directory: {}", args.model.display()));
+    }
+    if args.revision != server::service::MODEL_REVISION {
+        return Err(format!(
+            "--revision must be {}, got {}",
+            server::service::MODEL_REVISION,
+            args.revision
+        ));
+    }
+    if args.gpu_uuid.trim().is_empty() {
+        return Err("--gpu-uuid must be non-empty".into());
+    }
+    if args.max_model_len == 0 {
+        return Err("--max-model-len must be positive".into());
+    }
+    if args.queue_capacity == 0 {
+        return Err("--queue-capacity must be positive".into());
+    }
+    Ok(())
+}
+
+fn run_serve(args: ServeArgs) -> Result<(), String> {
+    validate_serve_args(&args)?;
+    let inventory = apxinf_model::Qwen35CheckpointInventory::from_checkpoint_dir(
+        &args.model,
+        args.revision.clone(),
+    )
+    .map_err(|error| format!("checkpoint validation failed: {error}"))?;
+    if inventory.config.max_position_embeddings < args.max_model_len {
+        return Err(format!(
+            "--max-model-len {} exceeds checkpoint max position {}",
+            args.max_model_len, inventory.config.max_position_embeddings
+        ));
+    }
+    let observed_uuid = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=uuid", "--format=csv,noheader"])
+        .output()
+        .map_err(|error| format!("nvidia-smi unavailable: {error}"))?;
+    if !observed_uuid.status.success() {
+        return Err(format!(
+            "nvidia-smi failed: {}",
+            String::from_utf8_lossy(&observed_uuid.stderr)
+        ));
+    }
+    if !String::from_utf8_lossy(&observed_uuid.stdout)
+        .lines()
+        .any(|line| line.trim() == args.gpu_uuid)
+    {
+        return Err(format!("requested GPU UUID {} is not visible", args.gpu_uuid));
+    }
+    let _ = args.bind;
+    let _ = args.queue_capacity;
+    let _ = inventory;
+    Err("checkpoint-backed CUDA Qwen3.5 executor is not linked; refusing CPU/stub fallback".into())
 }
 
 fn parse_device(s: &str) -> Device {
@@ -432,6 +533,52 @@ fn parse_npy_shape(header: &str) -> Result<Vec<usize>, String> {
         return Err("NumPy array has an empty shape".to_string());
     }
     Ok(shape)
+}
+
+#[cfg(test)]
+mod serve_tests {
+    use super::{validate_serve_args, ServeArgs};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::path::PathBuf;
+
+    fn args(model: PathBuf) -> ServeArgs {
+        ServeArgs {
+            model,
+            revision: "63768c10df38c0395e12ef49edac1bd539eaeeea".into(),
+            gpu_uuid: "GPU-d074a13d-dbb6-fceb-4caf-a45be9be9281".into(),
+            bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8000),
+            max_model_len: 32,
+            queue_capacity: 1,
+        }
+    }
+
+    #[test]
+    fn strict_serve_rejects_missing_model_and_wrong_revision() {
+        let missing = args(PathBuf::from("/definitely/missing/apxinf-qwen35"));
+        assert!(validate_serve_args(&missing).unwrap_err().contains("--model"));
+        let directory = std::env::temp_dir().join(format!("apxinf-serve-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut wrong = args(directory.clone());
+        wrong.revision = "wrong".into();
+        assert!(validate_serve_args(&wrong).unwrap_err().contains("--revision"));
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn strict_serve_rejects_empty_gpu_and_zero_limits() {
+        let directory = std::env::temp_dir().join(format!("apxinf-serve-limits-test-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut value = args(directory.clone());
+        value.gpu_uuid.clear();
+        assert!(validate_serve_args(&value).unwrap_err().contains("--gpu-uuid"));
+        value.gpu_uuid = "GPU-test".into();
+        value.max_model_len = 0;
+        assert!(validate_serve_args(&value).unwrap_err().contains("--max-model-len"));
+        value.max_model_len = 32;
+        value.queue_capacity = 0;
+        assert!(validate_serve_args(&value).unwrap_err().contains("--queue-capacity"));
+        std::fs::remove_dir(&directory).unwrap();
+    }
 }
 fn run_test() {
     println!("apxinf — LLM inference engine (test mode)");
