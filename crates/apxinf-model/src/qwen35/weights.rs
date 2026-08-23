@@ -20,6 +20,10 @@ pub enum WeightLayoutError {
     InvalidPackedDtype,
     #[error("scale dtype must be BF16")]
     InvalidScaleDtype,
+    #[error("activation length must be {expected}, got {got}")]
+    ActivationLength { expected: usize, got: usize },
+    #[error("weight buffers have inconsistent lengths")]
+    BufferLength,
 }
 
 impl PackedLinearLayout {
@@ -93,6 +97,45 @@ impl PackedLinearLayout {
         let zp = ((packed_zp >> ((out % 8) * 4)) & 0xF) as f32;
         Some((q - zp) * scale)
     }
+
+    /// Reference asymmetric W4 matrix-vector product. Packed storage follows
+    /// the checkpoint contract: nibbles are packed along K and zero-points
+    /// are packed along N, with group-32 scales along K.
+    pub fn matvec_f32(
+        &self,
+        weight_packed: &[u32],
+        scales: &[f32],
+        zero_points: &[u32],
+        activation: &[f32],
+    ) -> Result<Vec<f32>, WeightLayoutError> {
+        if activation.len() != self.in_features {
+            return Err(WeightLayoutError::ActivationLength {
+                expected: self.in_features,
+                got: activation.len(),
+            });
+        }
+        let expected_weight = self.out_features * self.packed_k_columns();
+        let expected_scales = self.out_features * self.groups();
+        let expected_zp = self.packed_n_rows() * self.groups();
+        if weight_packed.len() != expected_weight
+            || scales.len() != expected_scales
+            || zero_points.len() != expected_zp
+        {
+            return Err(WeightLayoutError::BufferLength);
+        }
+        let mut output = vec![0.0; self.out_features];
+        for (out, result) in output.iter_mut().enumerate() {
+            let mut sum = 0.0f32;
+            for (k, value) in activation.iter().enumerate() {
+                let weight = self
+                    .dequantize_value(weight_packed, scales, zero_points, out, k)
+                    .ok_or(WeightLayoutError::BufferLength)?;
+                sum += *value * weight;
+            }
+            *result = sum;
+        }
+        Ok(output)
+    }
 }
 
 #[cfg(test)]
@@ -137,5 +180,33 @@ mod tests {
             layout.dequantize_value(&packed, &scales, &zero_points, 9, 8),
             Some(-6.0)
         );
+    }
+
+    #[test]
+    fn reference_matvec_handles_group_boundary_and_tail() {
+        let layout = PackedLinearLayout::new(9, 5, 4);
+        let mut packed = vec![0u32; layout.out_features * layout.packed_k_columns()];
+        for out in 0..layout.out_features {
+            packed[out * layout.packed_k_columns()] = 0x0000_3210;
+        }
+        let scales = vec![1.0; layout.out_features * layout.groups()];
+        let zero_points = vec![0u32; layout.packed_n_rows() * layout.groups()];
+        let result = layout.matvec_f32(&packed, &scales, &zero_points, &[1.0; 5]).unwrap();
+        assert_eq!(result.len(), 9);
+        assert_eq!(result[0], 6.0);
+        assert_eq!(result[8], 6.0);
+    }
+
+    #[test]
+    fn reference_matvec_rejects_wrong_activation_or_buffers() {
+        let layout = PackedLinearLayout::new(2, 8, 4);
+        assert!(matches!(
+            layout.matvec_f32(&[0; 2], &[1.0; 4], &[0; 1], &[1.0]),
+            Err(WeightLayoutError::ActivationLength { .. })
+        ));
+        assert!(matches!(
+            layout.matvec_f32(&[0], &[1.0; 4], &[0; 1], &[1.0; 8]),
+            Err(WeightLayoutError::BufferLength)
+        ));
     }
 }
