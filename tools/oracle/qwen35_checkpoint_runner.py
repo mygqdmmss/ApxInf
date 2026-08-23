@@ -21,6 +21,73 @@ EOS_TOKEN_IDS = (248_046, 248_044)
 MODEL_VOCAB_SIZE = 248_320
 
 
+def decompress_module(module: Any) -> None:
+    """Expand one compressed-tensors module for its current GPU invocation."""
+    from compressed_tensors.compressors.base import decompress_module as _decompress
+
+    _decompress(module)
+
+
+def snapshot_compressed_module(module: Any) -> dict[str, Any]:
+    """Retain one module's packed tensors so they can be restored bit-for-bit."""
+    from compressed_tensors.utils import get_direct_state_dict
+
+    return {
+        "state": dict(get_direct_state_dict(module)),
+        "quantization_status": getattr(module, "quantization_status", None),
+    }
+
+
+def restore_compressed_module(module: Any, snapshot: dict[str, Any]) -> None:
+    """Restore the packed state captured before a temporary expansion."""
+    from compressed_tensors.utils import replace_direct_state_dict
+
+    replace_direct_state_dict(module, snapshot["state"])
+    if snapshot["quantization_status"] is None:
+        try:
+            delattr(module, "quantization_status")
+        except AttributeError:
+            pass
+    else:
+        module.quantization_status = snapshot["quantization_status"]
+
+
+def install_ephemeral_decompression_hooks(model: Any) -> list[Any]:
+    """Expand and restore each packed linear only during its forward call.
+
+    Transformers' compressed-tensors loader otherwise registers one model-level
+    hook that expands all 399 quantized modules at once. The per-module hooks
+    keep the checkpoint packed between calls and retain the original tensors.
+    """
+    handles: list[Any] = []
+    snapshots: dict[int, dict[str, Any]] = {}
+
+    def before(module: Any, _inputs: tuple[Any, ...]) -> None:
+        key = id(module)
+        if key in snapshots:
+            raise RuntimeError("quantized module entered twice before restoration")
+        snapshot = snapshot_compressed_module(module)
+        snapshots[key] = snapshot
+        try:
+            decompress_module(module)
+        except BaseException:
+            snapshots.pop(key, None)
+            raise
+
+    def after(module: Any, _inputs: tuple[Any, ...], _output: Any) -> None:
+        snapshot = snapshots.pop(id(module), None)
+        if snapshot is None:
+            raise RuntimeError("quantized module completed without a packed snapshot")
+        restore_compressed_module(module, snapshot)
+
+    for _name, module in model.named_modules():
+        if getattr(module, "quantization_scheme", None) is None:
+            continue
+        handles.append(module.register_forward_pre_hook(before))
+        handles.append(module.register_forward_hook(after, always_call=True))
+    return handles
+
+
 def canonical_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -170,11 +237,19 @@ def run_job() -> None:
         device_map={"": device},
     )
     model.eval()
+    # Transformers' default compressed-tensors hook expands every quantized
+    # module on the first model call. Replace it with per-module hooks so only
+    # the active linear temporarily occupies dense BF16 memory.
+    model_decompress_hook = getattr(model, "ct_decompress_hook", None)
+    if model_decompress_hook is not None:
+        model_decompress_hook.remove()
+        delattr(model, "ct_decompress_hook")
+    ephemeral_handles = install_ephemeral_decompression_hooks(model)
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     input_ids = torch.tensor([input_ids_list], dtype=torch.long, device=device)
 
     hidden_layers = sorted(index for index in layers if "layer_hidden" in stages)
-    captures, handles = _register_hidden_hooks(model, hidden_layers)
+    captures, hidden_handles = _register_hidden_hooks(model, hidden_layers)
     logits = []
     top_margins = []
     generated: list[int] = []
@@ -212,7 +287,9 @@ def run_job() -> None:
             else:
                 stop_reason = "budget"
     finally:
-        for handle in handles:
+        for handle in hidden_handles:
+            handle.remove()
+        for handle in ephemeral_handles:
             handle.remove()
 
     if not generated:

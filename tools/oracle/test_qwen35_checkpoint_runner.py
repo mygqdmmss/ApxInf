@@ -1,6 +1,7 @@
 import importlib.util
 import struct
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -33,6 +34,43 @@ class RunnerUnitTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), struct.pack("<ff", 1.0, -2.5))
         finally:
             path.unlink(missing_ok=True)
+
+    def test_ephemeral_decompression_hooks_restore_packed_state_each_module(self):
+        self.assertIsNotNone(getattr(runner, "install_ephemeral_decompression_hooks", None))
+
+        class FakeModule:
+            quantization_scheme = mock.sentinel.scheme
+
+            def register_forward_pre_hook(self, callback):
+                self.pre = callback
+                return mock.sentinel.pre_handle
+
+            def register_forward_hook(self, callback, *, always_call):
+                self.always_call = always_call
+                self.post = callback
+                return mock.sentinel.post_handle
+
+        first = FakeModule()
+        second = FakeModule()
+        class FakeModel:
+            def named_modules(self):
+                return [("first", first), ("second", second)]
+
+        with mock.patch.object(runner, "snapshot_compressed_module", create=True,
+                               return_value=mock.sentinel.state) as snapshot, mock.patch.object(
+            runner, "decompress_module", create=True
+        ) as decompress, mock.patch.object(
+            runner, "restore_compressed_module", create=True
+        ) as restore:
+            handles = runner.install_ephemeral_decompression_hooks(FakeModel())
+            self.assertEqual(handles, [mock.sentinel.pre_handle, mock.sentinel.post_handle,
+                                       mock.sentinel.pre_handle, mock.sentinel.post_handle])
+            first.pre(first, ())
+            first.post(first, (), None)
+            snapshot.assert_called_once_with(first)
+            decompress.assert_called_once_with(first)
+            restore.assert_called_once_with(first, mock.sentinel.state)
+            self.assertTrue(first.always_call)
 
 
 if __name__ == "__main__":
