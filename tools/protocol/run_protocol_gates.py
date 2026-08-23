@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 CONTRACT = "apxinf.qwen38_27b.inference_interface.v1"
+MODEL_REVISION = "63768c10df38c0395e12ef49edac1bd539eaeeea"
+MODEL_VOCAB_SIZE = 248_320
 
 
 def build_cases(max_model_len: int, token: int = 1) -> list[dict[str, Any]]:
@@ -70,6 +72,7 @@ def _request(base_url: str, case: dict[str, Any], timeout: float) -> dict[str, A
         headers={"Content-Type": "application/json"},
     )
     started = time.monotonic()
+    started_at = datetime.now(timezone.utc).isoformat()
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read()
@@ -87,9 +90,14 @@ def _request(base_url: str, case: dict[str, Any], timeout: float) -> dict[str, A
         "request_method": method,
         "request_path": path,
         "request_body": payload.decode("utf-8", errors="replace"),
+        "request_body_raw": payload.decode("utf-8", errors="replace"),
         "status_code": status,
         "response": parsed if parsed is not None else text[:4000],
+        "response_raw": text,
         "elapsed_ms": round(elapsed_ms, 3),
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -124,12 +132,11 @@ def evaluate_row(case: dict[str, Any], result: dict[str, Any]) -> bool:
     if case_id == "health_after_invalid_requests":
         return status == 200 and isinstance(response, dict) and response.get("status") == "ok"
     if case_id == "health_contract_identity":
-        return (
-            status == 200
-            and isinstance(response, dict)
-            and response.get("status") == "ok"
-            and response.get("evaluation_contract") == CONTRACT
-        )
+        try:
+            validate_health_identity(result)
+        except ValueError:
+            return False
+        return True
     raise ValueError(f"unknown protocol gate {case_id}")
 
 
@@ -139,6 +146,30 @@ def health_max_model_len(health_result: dict[str, Any]) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ValueError("/health.max_model_len must be a positive integer")
     return value
+
+
+def validate_health_identity(health_result: dict[str, Any]) -> str:
+    """Validate the frozen evaluator identity and classify fixture evidence."""
+    if health_result.get("status_code") != 200:
+        raise ValueError("/health must return HTTP 200")
+    response = health_result.get("response")
+    if not isinstance(response, dict) or response.get("status") != "ok":
+        raise ValueError("/health response must have status=ok")
+    if response.get("evaluation_contract") != CONTRACT:
+        raise ValueError("unexpected evaluation contract")
+    if response.get("model_revision") != MODEL_REVISION:
+        raise ValueError("unexpected model revision")
+    if response.get("vocab_size") != MODEL_VOCAB_SIZE:
+        raise ValueError("/health.vocab_size must equal model vocab 248320")
+    if response.get("fallback_active") is not False:
+        raise ValueError("fallback_active must be false")
+    capabilities = response.get("capabilities")
+    if not isinstance(capabilities, dict) or capabilities.get("multimodal") is not False:
+        raise ValueError("multimodal capability must be false")
+    stub = response.get("stub")
+    if not isinstance(stub, bool):
+        raise ValueError("/health.stub must be a boolean")
+    return "stub_fixture" if stub else "production_runtime"
 
 
 def run_gates(base_url: str, timeout: float) -> dict[str, Any]:
@@ -153,20 +184,30 @@ def run_gates(base_url: str, timeout: float) -> dict[str, Any]:
         {"id": "initial_health", "method": "GET", "path": "/health"},
         timeout,
     )
+    runtime_kind = validate_health_identity(initial_health)
     max_model_len = health_max_model_len(initial_health)
     rows = []
     for case in build_cases(max_model_len):
         result = _request(base_url, case, timeout)
         passed = evaluate_row(case, result)
         rows.append({**case, **result, "passed": passed})
+    ending_health = _request(
+        base_url,
+        {"id": "ending_health", "method": "GET", "path": "/health"},
+        timeout,
+    )
+    ending_kind = validate_health_identity(ending_health)
     return {
-        "schema": "apxinf.protocol-gates.v1",
+        "schema": "apxinf.protocol-gates.v2",
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "commit": commit,
         "base_url": base_url.rstrip("/"),
+        "runtime_kind": runtime_kind,
+        "stub": runtime_kind == "stub_fixture",
         "max_model_len": max_model_len,
         "initial_health": initial_health,
-        "passed": all(row["passed"] for row in rows),
+        "ending_health": ending_health,
+        "passed": all(row["passed"] for row in rows) and ending_kind == runtime_kind,
         "rows": rows,
     }
 

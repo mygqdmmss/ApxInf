@@ -449,6 +449,35 @@ mod tests {
     }
 
     #[test]
+    fn queue_full_maps_to_capacity_and_service_recovers() {
+        let service = ProtocolService::new(
+            FakeRuntime::new(vec![
+                StartResult::Error(RuntimeError::QueueFull),
+                StartResult::Tokens(vec![7]),
+            ]),
+            true,
+        );
+        let failed = service.handle_non_stream(&body(true, false));
+        assert_eq!(failed.status, 503);
+        let value: Value = serde_json::from_slice(&failed.body).unwrap();
+        assert_eq!(value["error"]["type"], "capacity");
+        assert_eq!(service.handle_non_stream(&body(true, false)).status, 200);
+    }
+
+    #[test]
+    fn execution_error_does_not_poison_next_eight_token_request() {
+        let service = ProtocolService::new(
+            FakeRuntime::new(vec![
+                StartResult::TokensThenError(vec![], RuntimeError::Execution("boom".into())),
+                StartResult::Tokens(vec![7]),
+            ]),
+            true,
+        );
+        assert_eq!(service.handle_non_stream(&body(true, false)).status, 500);
+        assert_eq!(service.handle_non_stream(&body(true, false)).status, 200);
+    }
+
+    #[test]
     fn protocol_errors_map_to_400_without_starting_runtime() {
         let service = ProtocolService::new(FakeRuntime::new(vec![]), true);
         let response = service.handle_non_stream(b"{not-json");
@@ -521,6 +550,49 @@ mod tests {
             .as_ref()
             .unwrap()
             .is_cancelled());
+    }
+
+    #[test]
+    fn stream_frames_keep_request_identity_and_contiguous_indexes() {
+        let service = ProtocolService::new(
+            FakeRuntime::new(vec![StartResult::Tokens(vec![7, 8, 9])]),
+            true,
+        );
+        let mut generation = service
+            .start_stream(&body_with_budget(true, true, 3))
+            .unwrap();
+        let frames = [
+            generation.next_frame().unwrap().unwrap(),
+            generation.next_frame().unwrap().unwrap(),
+        ];
+        let request_id = generation.request_id().to_owned();
+        for (expected_index, frame) in frames.iter().enumerate() {
+            let value: Value = serde_json::from_str(
+                String::from_utf8(frame.clone())
+                    .unwrap()
+                    .trim_start_matches("data: ")
+                    .trim(),
+            )
+            .unwrap();
+            assert_eq!(value["request_id"], request_id);
+            assert_eq!(value["index"], expected_index);
+        }
+    }
+
+    #[test]
+    fn separate_requests_receive_non_overlapping_ids() {
+        let service = ProtocolService::new(
+            FakeRuntime::new(vec![
+                StartResult::Tokens(vec![7]),
+                StartResult::Tokens(vec![8]),
+            ]),
+            true,
+        );
+        let first = service.start_stream(&body(true, true)).unwrap();
+        let first_id = first.request_id().to_owned();
+        drop(first);
+        let second = service.start_stream(&body(true, true)).unwrap();
+        assert_ne!(first_id, second.request_id());
     }
 
     #[test]
