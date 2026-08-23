@@ -3,6 +3,7 @@ pub mod attention;
 pub mod config;
 pub mod gdn;
 pub mod loader;
+pub mod model;
 pub mod weights;
 
 pub use admission::{
@@ -19,4 +20,8 @@ pub use config::{
 };
 pub use gdn::{GdnDimensions, GdnError, GdnState};
 pub use loader::{Qwen35CheckpointInventory, Qwen35LoaderError};
+pub use model::{
+    greedy_argmax, ExecutorError, GenerationOutput, Qwen35ReferenceExecutor, Qwen35RequestState,
+    StopReason,
+};
 pub use weights::{PackedLinearLayout, WeightLayoutError};
