@@ -5,6 +5,7 @@
 | Experiment ID | Owner | Candidate | Fixed commit | GPU UUID | Status | Result/artifact |
 | --- | --- | --- | --- | --- | --- | --- |
 | M1-R0-CAPTURE | 成员1 | 环境/合同/模型基线采集（无 GPU model job） | `d1d0b0aec2f9545eb0e2195e2e7ea0af1babbff1` | `GPU-d074a13d-dbb6-fceb-4caf-a45be9be9281` | blocked | `/mnt/chuangxin/team2/artifacts/apxinf/r0/d1d0b0aec2f9545eb0e2195e2e7ea0af1babbff1/`; Xid evidence unavailable and M2-O0 handoff missing |
+| M3-E0-W4-GEMV-001 | member3 | packed-W4 decode GEMV scaffolding | `81dad4753f2aa72b77f8deddbe7fb290b3d1789e` | pending RTX 4090 replay | planned | `benchmarks/campaign/manifests/w4-gemv-baseline.json` |
 
 ## 记录要求
 
