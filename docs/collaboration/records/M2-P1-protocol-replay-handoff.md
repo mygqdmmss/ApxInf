@@ -31,7 +31,8 @@ recovery remain member1 responsibilities.
 
 ## Commit
 
-Complete implementation commit: `f98cb6ff7e96476c244b0e42db13600c2726520c`
+Implementation commit: `f98cb6ff7e96476c244b0e42db13600c2726520c`  
+Evidence capture commit: `c95f3b0e1240f1f7edf6886d732a7a19bf9da52e`
 
 Parent integration baseline: `3139979882ffaa1feae34131f15d46a4d43e12ad`  
 Rollback commit: `3139979882ffaa1feae34131f15d46a4d43e12ad`
