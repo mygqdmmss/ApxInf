@@ -6,7 +6,9 @@ use apxinf_loader::safetensors::{read_sharded_tensor_manifest, read_tensor_manif
 use apxinf_loader::{LoaderManifest, ManifestDType, LOADER_MANIFEST_SCHEMA, QWEN35_MODEL_REVISION};
 use thiserror::Error;
 
+use super::attention::PackedLinearReference;
 use super::config::{Qwen35ConfigError, Qwen35ModelConfig};
+use super::weights::{PackedLinearLayout, WeightLayoutError};
 
 #[derive(Debug, Error)]
 pub enum Qwen35LoaderError {
@@ -29,6 +31,23 @@ pub enum Qwen35LoaderError {
     QuantizationLayout(String),
     #[error("safetensors inventory: {0}")]
     Inventory(String),
+    #[error("projection `{base}` is missing tensor `{suffix}`")]
+    MissingProjectionTensor { base: String, suffix: &'static str },
+    #[error("projection `{base}` tensor `{suffix}` has dtype {dtype:?}, expected {expected}")]
+    ProjectionDType {
+        base: String,
+        suffix: &'static str,
+        dtype: ManifestDType,
+        expected: &'static str,
+    },
+    #[error("projection `{base}` has invalid shape metadata: {details}")]
+    ProjectionShape { base: String, details: String },
+    #[error("projection `{base}` layout validation failed: {source}")]
+    ProjectionLayout {
+        base: String,
+        #[source]
+        source: WeightLayoutError,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -288,6 +307,150 @@ impl Qwen35CheckpointInventory {
             .collect())
     }
 
+    /// Read one asymmetric W4 projection without materializing any other tensor.
+    pub fn read_packed_linear(
+        &self,
+        base: &str,
+    ) -> Result<PackedLinearReference, Qwen35LoaderError> {
+        let shape_name = format!("{base}.weight_shape");
+        let shape_manifest = self.tensor_manifest_or_projection(base, "weight_shape")?;
+        if shape_manifest.shape != [2] {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!(
+                    "weight_shape tensor must have manifest shape [2], got {:?}",
+                    shape_manifest.shape
+                ),
+            });
+        }
+        if shape_manifest.dtype != ManifestDType::Other("I64".to_owned()) {
+            return Err(Qwen35LoaderError::ProjectionDType {
+                base: base.to_owned(),
+                suffix: "weight_shape",
+                dtype: shape_manifest.dtype.clone(),
+                expected: "I64",
+            });
+        }
+        let dimensions = self.read_tensor_i64(&shape_name)?;
+        if dimensions.len() != 2 || dimensions.iter().any(|value| *value <= 0) {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!(
+                    "weight_shape payload must contain two positive values, got {dimensions:?}"
+                ),
+            });
+        }
+        let out_features =
+            usize::try_from(dimensions[0]).map_err(|_| Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!("output dimension overflows usize: {}", dimensions[0]),
+            })?;
+        let in_features =
+            usize::try_from(dimensions[1]).map_err(|_| Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!("input dimension overflows usize: {}", dimensions[1]),
+            })?;
+        let layout = PackedLinearLayout::new(out_features, in_features, 32);
+        let packed_name = format!("{base}.weight_packed");
+        let scale_name = format!("{base}.weight_scale");
+        let zero_point_name = format!("{base}.weight_zero_point");
+        let packed_manifest = self.tensor_manifest_or_projection(base, "weight_packed")?;
+        let scale_manifest = self.tensor_manifest_or_projection(base, "weight_scale")?;
+        let zero_point_manifest = self.tensor_manifest_or_projection(base, "weight_zero_point")?;
+        if packed_manifest.dtype != ManifestDType::I32 {
+            return Err(Qwen35LoaderError::ProjectionDType {
+                base: base.to_owned(),
+                suffix: "weight_packed",
+                dtype: packed_manifest.dtype.clone(),
+                expected: "I32",
+            });
+        }
+        if scale_manifest.dtype != ManifestDType::BF16 {
+            return Err(Qwen35LoaderError::ProjectionDType {
+                base: base.to_owned(),
+                suffix: "weight_scale",
+                dtype: scale_manifest.dtype.clone(),
+                expected: "BF16",
+            });
+        }
+        if zero_point_manifest.dtype != ManifestDType::I32 {
+            return Err(Qwen35LoaderError::ProjectionDType {
+                base: base.to_owned(),
+                suffix: "weight_zero_point",
+                dtype: zero_point_manifest.dtype.clone(),
+                expected: "I32",
+            });
+        }
+        layout
+            .validate_shapes(
+                &packed_manifest.shape,
+                &scale_manifest.shape,
+                &zero_point_manifest.shape,
+            )
+            .map_err(|source| Qwen35LoaderError::ProjectionLayout {
+                base: base.to_owned(),
+                source,
+            })?;
+        let weight_packed = self.read_tensor_u32(&packed_name)?;
+        let scales = self.read_tensor_bf16_f32(&scale_name)?;
+        let zero_points = self.read_tensor_u32(&zero_point_name)?;
+        if weight_packed.len() != out_features * layout.packed_k_columns()
+            || scales.len() != out_features * layout.groups()
+            || zero_points.len() != layout.packed_n_rows() * layout.groups()
+        {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: "payload lengths do not match manifest shapes".into(),
+            });
+        }
+        if let Some(index) = scales.iter().position(|value| !value.is_finite()) {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!("scale payload at index {index} is not finite"),
+            });
+        }
+        Ok(PackedLinearReference {
+            layout,
+            weight_packed,
+            scales,
+            zero_points,
+        })
+    }
+
+    fn tensor_manifest_or_projection(
+        &self,
+        base: &str,
+        suffix: &'static str,
+    ) -> Result<&apxinf_loader::TensorManifest, Qwen35LoaderError> {
+        let name = format!("{base}.{suffix}");
+        self.manifest
+            .tensor(&name)
+            .ok_or_else(|| Qwen35LoaderError::MissingProjectionTensor {
+                base: base.to_owned(),
+                suffix,
+            })
+    }
+
+    fn read_tensor_i64(&self, name: &str) -> Result<Vec<i64>, Qwen35LoaderError> {
+        let manifest = self.tensor_manifest(name)?;
+        if manifest.dtype != ManifestDType::Other("I64".to_owned()) {
+            return Err(Qwen35LoaderError::UnsupportedDType {
+                name: name.to_owned(),
+                dtype: manifest.dtype.clone(),
+            });
+        }
+        let bytes = self.read_tensor_bytes(name)?;
+        if bytes.len() % 8 != 0 {
+            return Err(Qwen35LoaderError::Inventory(format!(
+                "I64 tensor `{name}` byte length is not divisible by 8"
+            )));
+        }
+        Ok(bytes
+            .chunks_exact(8)
+            .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect())
+    }
+
     fn validate_tensor_inventory(manifest: &LoaderManifest) -> Result<(), Qwen35LoaderError> {
         if manifest.tensors.is_empty() {
             return Err(Qwen35LoaderError::EmptyInventory);
@@ -399,6 +562,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::qwen35::config::MODEL_VOCAB_SIZE;
+    use crate::qwen35::PackedLinearLayout;
     use apxinf_loader::{ManifestDType, TensorManifest};
 
     fn config() -> String {
@@ -528,6 +692,27 @@ mod tests {
             Qwen35CheckpointInventory::from_manifest(&config(), manifest),
             Err(Qwen35LoaderError::UnsupportedDType { .. })
         ));
+    }
+
+    #[test]
+    #[ignore = "requires the pinned Qwen3.5 checkpoint payload"]
+    fn real_checkpoint_reads_a_packed_projection_without_expanding_checkpoint() {
+        let dir = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
+            .map(std::path::PathBuf::from)
+            .expect("APXINF_QWEN35_CHECKPOINT must point to the pinned checkpoint");
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&dir, QWEN35_MODEL_REVISION).unwrap();
+        let projection = inventory
+            .read_packed_linear("model.language_model.layers.0.linear_attn.in_proj_qkv")
+            .unwrap();
+        assert_eq!(
+            projection.layout,
+            PackedLinearLayout::new(10_240, 5_120, 32)
+        );
+        assert_eq!(projection.weight_packed.len(), 10_240 * 640);
+        assert_eq!(projection.scales.len(), 10_240 * 160);
+        assert_eq!(projection.zero_points.len(), 1_280 * 160);
+        assert!(projection.scales.iter().all(|value| value.is_finite()));
     }
 
     fn tiny_safetensors(name: &str, dtype: &str, shape: &[usize], payload: &[u8]) -> Vec<u8> {
