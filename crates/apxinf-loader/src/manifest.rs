@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const QWEN35_MODEL_VOCAB_SIZE: usize = 248_320;
+pub const QWEN35_MODEL_REVISION: &str = "63768c10df38c0395e12ef49edac1bd539eaeeea";
+pub const LOADER_MANIFEST_SCHEMA: &str = "apxinf.loader-manifest.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManifestDType {
@@ -20,11 +22,19 @@ pub enum PackAxis {
     K,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuantizationRole {
+    PackedWeight,
+    Scale,
+    ZeroPoint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TensorManifest {
     pub name: String,
     pub shape: Vec<usize>,
     pub dtype: ManifestDType,
+    pub quantization_role: Option<QuantizationRole>,
     pub pack_axis: Option<PackAxis>,
     pub group_size: Option<usize>,
 }
@@ -39,10 +49,16 @@ pub struct LoaderManifest {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum ManifestError {
-    #[error("manifest schema must not be empty")]
-    EmptySchema,
-    #[error("manifest revision must not be empty")]
-    EmptyRevision,
+    #[error("manifest schema must be {expected}, got {actual}")]
+    Schema {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("manifest revision must be {expected}, got {actual}")]
+    Revision {
+        expected: &'static str,
+        actual: String,
+    },
     #[error("manifest vocab_size must be {expected}, got {actual}")]
     VocabSize { expected: usize, actual: usize },
     #[error("duplicate tensor name `{0}`")]
@@ -55,11 +71,17 @@ pub enum ManifestError {
 
 impl LoaderManifest {
     pub fn validate(&self) -> Result<(), ManifestError> {
-        if self.schema.trim().is_empty() {
-            return Err(ManifestError::EmptySchema);
+        if self.schema != LOADER_MANIFEST_SCHEMA {
+            return Err(ManifestError::Schema {
+                expected: LOADER_MANIFEST_SCHEMA,
+                actual: self.schema.clone(),
+            });
         }
-        if self.revision.trim().is_empty() {
-            return Err(ManifestError::EmptyRevision);
+        if self.revision != QWEN35_MODEL_REVISION {
+            return Err(ManifestError::Revision {
+                expected: QWEN35_MODEL_REVISION,
+                actual: self.revision.clone(),
+            });
         }
         if self.vocab_size != QWEN35_MODEL_VOCAB_SIZE {
             return Err(ManifestError::VocabSize {
@@ -96,6 +118,7 @@ mod tests {
             name: name.to_owned(),
             shape: vec![2, 4],
             dtype: ManifestDType::I32,
+            quantization_role: Some(QuantizationRole::PackedWeight),
             pack_axis: Some(PackAxis::K),
             group_size: None,
         }
@@ -103,8 +126,8 @@ mod tests {
 
     fn manifest() -> LoaderManifest {
         LoaderManifest {
-            schema: "apxinf.loader-manifest.v1".to_owned(),
-            revision: "revision-1".to_owned(),
+            schema: LOADER_MANIFEST_SCHEMA.to_owned(),
+            revision: QWEN35_MODEL_REVISION.to_owned(),
             vocab_size: QWEN35_MODEL_VOCAB_SIZE,
             tensors: vec![tensor("a"), tensor("b")],
         }
@@ -123,8 +146,18 @@ mod tests {
     #[test]
     fn manifest_rejects_identity_and_inventory_errors() {
         let mut value = manifest();
-        value.revision.clear();
-        assert_eq!(value.validate(), Err(ManifestError::EmptyRevision));
+        value.revision = "wrong-revision".to_owned();
+        assert!(matches!(
+            value.validate(),
+            Err(ManifestError::Revision { .. })
+        ));
+
+        let mut value = manifest();
+        value.schema = "apxinf.loader-manifest.v2".to_owned();
+        assert!(matches!(
+            value.validate(),
+            Err(ManifestError::Schema { .. })
+        ));
 
         let mut value = manifest();
         value.vocab_size = 248_044;

@@ -141,6 +141,38 @@ class OracleGeneratorTests(unittest.TestCase):
             ],
         )
 
+    def test_artifact_identity_changes_with_generation_parameters(self) -> None:
+        short = oracle.build_job(
+            self.model_dir, REVISION, [], ["tokens"], None, 1
+        )
+        longer = oracle.build_job(
+            self.model_dir, REVISION, [], ["tokens"], None, 2
+        )
+        self.assertNotEqual(
+            short["artifact_identity_sha256"], longer["artifact_identity_sha256"]
+        )
+
+    def test_symbolic_shapes_and_f32_values_fail_closed(self) -> None:
+        symbols = {
+            "prompt_tokens": 8,
+            "completion_tokens": 1,
+            "trajectory_tokens": 9,
+        }
+        self.assertEqual(
+            oracle._validate_shape(
+                [9, 5120], ["trajectory_tokens", 5120], symbols, "hidden.bin"
+            ),
+            [9, 5120],
+        )
+        with self.assertRaisesRegex(ValueError, "shape mismatch"):
+            oracle._validate_shape(
+                [8, 5120], ["trajectory_tokens", 5120], symbols, "hidden.bin"
+            )
+        nan_path = self.root / "nan.f32.bin"
+        nan_path.write_bytes(__import__("struct").pack("<f", float("nan")))
+        with self.assertRaisesRegex(ValueError, "non-finite"):
+            oracle._validate_f32_artifact(nan_path, [1], "nan.f32.bin")
+
     def test_rejects_wrong_vocab_eos_empty_revision_and_invalid_selection(self) -> None:
         config_path = self.model_dir / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -178,9 +210,9 @@ class RunnerTests(OracleGeneratorTests):
         super().setUp()
         self.bundle_index = 0
 
-    def _make_bundle(self) -> Path:
+    def _make_bundle(self, max_new_tokens: int = 1) -> Path:
         job = oracle.build_job(
-            self.model_dir, REVISION, [], ["tokens"], None, 1
+            self.model_dir, REVISION, [], ["tokens"], None, max_new_tokens
         )
         self.bundle_index += 1
         output_dir = self.root / f"runner-bundle-{self.bundle_index}"
@@ -207,7 +239,7 @@ class RunnerTests(OracleGeneratorTests):
             "payload = json.dumps({'schema':'apxinf.oracle-tokens.v1','output_token_ids':[7],"
             "'decoded_text':'fixture'}, sort_keys=True).encode() + b'\\n'\n"
             "(out / 'output-tokens.json').write_bytes(payload)\n"
-            "report = {'schema':'apxinf.oracle-artifact-report.v1','artifacts':["
+            "report = {'schema':'apxinf.oracle-artifact-report.v1','generation':{'completion_tokens':1,'stop_reason':'budget'},'artifacts':["
             "{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[1],"
             "'sha256':hashlib.sha256(payload).hexdigest()}]}\n"
             "(out / 'artifact-report.json').write_text(json.dumps(report))\n"
@@ -232,6 +264,9 @@ class RunnerTests(OracleGeneratorTests):
             "extra_directory": "payload=json.dumps({'schema':'apxinf.oracle-tokens.v1','output_token_ids':[7],'decoded_text':'x'}).encode()+b'\\n'\n(out / 'output-tokens.json').write_bytes(payload)\n(out / 'unexpected').mkdir()\n(out / 'artifact-report.json').write_text(json.dumps({'schema':'apxinf.oracle-artifact-report.v1','artifacts':[{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[1],'sha256':hashlib.sha256(payload).hexdigest()}]}))\n",
             "symlink": "target=out.parent / 'outside.json'\ntarget.write_text('{}')\n(out / 'output-tokens.json').symlink_to(target)\npayload=(out / 'output-tokens.json').read_bytes()\n(out / 'artifact-report.json').write_text(json.dumps({'schema':'apxinf.oracle-artifact-report.v1','artifacts':[{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[0],'sha256':hashlib.sha256(payload).hexdigest()}]}))\n",
             "control_tamper": "payload=json.dumps({'schema':'apxinf.oracle-tokens.v1','output_token_ids':[7],'decoded_text':'x'}).encode()+b'\\n'\n(out / 'output-tokens.json').write_bytes(payload)\n(out.parent / 'selection.json').write_text('{}')\n(out / 'artifact-report.json').write_text(json.dumps({'schema':'apxinf.oracle-artifact-report.v1','artifacts':[{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[1],'sha256':hashlib.sha256(payload).hexdigest()}]}))\n",
+            "empty_tokens": "payload=json.dumps({'schema':'apxinf.oracle-tokens.v1','output_token_ids':[],'decoded_text':''}).encode()+b'\\n'\n(out / 'output-tokens.json').write_bytes(payload)\n(out / 'artifact-report.json').write_text(json.dumps({'schema':'apxinf.oracle-artifact-report.v1','generation':{'completion_tokens':0,'stop_reason':'eos'},'artifacts':[{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[0],'sha256':hashlib.sha256(payload).hexdigest()}]}))\n",
+            "eos_followed": "payload=json.dumps({'schema':'apxinf.oracle-tokens.v1','output_token_ids':[248046,7],'decoded_text':'x'}).encode()+b'\\n'\n(out / 'output-tokens.json').write_bytes(payload)\n(out / 'artifact-report.json').write_text(json.dumps({'schema':'apxinf.oracle-artifact-report.v1','generation':{'completion_tokens':2,'stop_reason':'eos'},'artifacts':[{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[2],'sha256':hashlib.sha256(payload).hexdigest()}]}))\n",
+            "artifact_dir_symlink": "outside=out.parent / 'outside-artifacts'\noutside.mkdir()\nout.rmdir()\nout.symlink_to(outside, target_is_directory=True)\npayload=json.dumps({'schema':'apxinf.oracle-tokens.v1','output_token_ids':[7],'decoded_text':'x'}).encode()+b'\\n'\n(out / 'output-tokens.json').write_bytes(payload)\n(out / 'artifact-report.json').write_text(json.dumps({'schema':'apxinf.oracle-artifact-report.v1','artifacts':[{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[1],'sha256':hashlib.sha256(payload).hexdigest()}]}))\n",
             "nonzero": "raise SystemExit(7)\n",
         }
         for name, body in cases.items():
@@ -240,6 +275,23 @@ class RunnerTests(OracleGeneratorTests):
                 runner = self._write_runner(body)
                 with self.assertRaises((ValueError, RuntimeError)):
                     oracle.run_runner(bundle, [sys.executable, str(runner)], [])
+
+    def test_runner_rejects_early_non_eos_and_model_metadata_drift(self) -> None:
+        bundle = self._make_bundle(max_new_tokens=2)
+        runner = self._write_runner(
+            "payload=json.dumps({'schema':'apxinf.oracle-tokens.v1','output_token_ids':[7],'decoded_text':'x'}).encode()+b'\\n'\n"
+            "(out / 'output-tokens.json').write_bytes(payload)\n"
+            "(out / 'artifact-report.json').write_text(json.dumps({'schema':'apxinf.oracle-artifact-report.v1','generation':{'completion_tokens':1,'stop_reason':'budget'},'artifacts':[{'file':'output-tokens.json','schema_ref':'tokens','dtype':'json','shape':[1],'sha256':hashlib.sha256(payload).hexdigest()}]}))\n"
+        )
+        with self.assertRaisesRegex(ValueError, "budget or end with EOS"):
+            oracle.run_runner(bundle, [sys.executable, str(runner)], [])
+
+        bundle = self._make_bundle()
+        config = json.loads((self.model_dir / "config.json").read_text())
+        config["text_config"]["vocab_size"] = 248044
+        write_json(self.model_dir / "config.json", config)
+        with self.assertRaisesRegex(ValueError, "metadata SHA256"):
+            oracle.run_runner(bundle, [sys.executable, str(runner)], [])
 
 
 if __name__ == "__main__":

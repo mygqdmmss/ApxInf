@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs::File;
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use memmap2::Mmap;
 use serde::Deserialize;
@@ -35,6 +35,42 @@ struct TensorInfo {
 #[derive(Debug, Deserialize)]
 struct SafetensorsIndex {
     weight_map: HashMap<String, String>,
+}
+
+fn resolve_shard_path(parent: &Path, shard: &str, index_path: &Path) -> Result<PathBuf, String> {
+    let relative = Path::new(shard);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "unsafe shard path `{shard}` in {}",
+            index_path.display()
+        ));
+    }
+    let candidate = parent.join(relative);
+    let metadata = std::fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("failed to inspect shard {}: {error}", candidate.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "SafeTensors shard `{shard}` in {} must not be a symlink",
+            index_path.display()
+        ));
+    }
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {}: {error}", parent.display()))?;
+    let canonical_candidate = candidate
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve {}: {error}", candidate.display()))?;
+    if !canonical_candidate.starts_with(&canonical_parent) {
+        return Err(format!(
+            "SafeTensors shard `{shard}` resolves outside {}",
+            parent.display()
+        ));
+    }
+    Ok(candidate)
 }
 
 /// Read only the SafeTensors JSON header and return a sorted tensor inventory.
@@ -85,6 +121,7 @@ pub fn read_tensor_manifest(path: &Path) -> Result<Vec<TensorManifest>, String> 
             name,
             shape: info.shape,
             dtype: manifest_dtype(&info.dtype),
+            quantization_role: None,
             pack_axis: None,
             group_size: None,
         });
@@ -113,18 +150,8 @@ pub fn read_sharded_tensor_manifest(index_path: &Path) -> Result<Vec<TensorManif
     let shards = index.weight_map.values().cloned().collect::<BTreeSet<_>>();
     let mut found = HashMap::<String, (String, TensorManifest)>::new();
     for shard in shards {
-        let relative = Path::new(&shard);
-        if relative.is_absolute()
-            || relative
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(format!(
-                "unsafe shard path `{shard}` in {}",
-                index_path.display()
-            ));
-        }
-        for tensor in read_tensor_manifest(&parent.join(&shard))? {
+        let shard_path = resolve_shard_path(parent, &shard, index_path)?;
+        for tensor in read_tensor_manifest(&shard_path)? {
             if found
                 .insert(tensor.name.clone(), (shard.clone(), tensor))
                 .is_some()
@@ -256,23 +283,13 @@ pub fn load_native_sharded(
     let mut metadata = HashMap::new();
 
     for shard in shards {
-        let shard_path = Path::new(&shard);
-        if shard_path.is_absolute()
-            || shard_path
-                .components()
-                .any(|component| matches!(component, Component::ParentDir))
-        {
-            return Err(format!(
-                "unsafe shard path `{shard}` in {}",
-                index_path.display()
-            ));
-        }
-        let (shard_tensors, shard_metadata) = load_native(&parent.join(&shard))?;
+        let shard_path = resolve_shard_path(parent, &shard, index_path)?;
+        let (shard_tensors, shard_metadata) = load_native(&shard_path)?;
         metadata.extend(shard_metadata);
         for (name, tensor) in shard_tensors {
-            let Some(expected_shard) = index.weight_map.get(&name) else {
-                continue;
-            };
+            let expected_shard = index.weight_map.get(&name).ok_or_else(|| {
+                format!("unindexed tensor `{name}` found in SafeTensors shard `{shard}`")
+            })?;
             if expected_shard != &shard {
                 return Err(format!(
                     "tensor `{name}` was found in `{shard}`, index assigns it to `{expected_shard}`"
@@ -613,6 +630,47 @@ mod tests {
         assert_eq!(tensors.len(), 2);
         assert_eq!(tensors["a"].dtype(), DType::F16);
         assert_eq!(tensors["b"].as_f16().unwrap()[0].to_f32(), -2.0);
+    }
+
+    #[test]
+    fn load_native_sharded_rejects_unindexed_tensors() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("model.safetensors"),
+            make_safetensors(&[
+                ("a", DType::F16, &[1], &[0u8; 2]),
+                ("extra", DType::F16, &[1], &[0u8; 2]),
+            ]),
+        )
+        .unwrap();
+        let index_path = directory.path().join("model.safetensors.index.json");
+        std::fs::write(&index_path, r#"{"weight_map":{"a":"model.safetensors"}}"#).unwrap();
+        let error = load_native_sharded(&index_path).unwrap_err();
+        assert!(error.contains("unindexed tensor `extra`"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sharded_readers_reject_symlinked_shards() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let outside = NamedTempFile::new().unwrap();
+        std::fs::write(
+            outside.path(),
+            make_safetensors(&[("a", DType::F16, &[1], &[0u8; 2])]),
+        )
+        .unwrap();
+        symlink(outside.path(), directory.path().join("linked.safetensors")).unwrap();
+        let index_path = directory.path().join("model.safetensors.index.json");
+        std::fs::write(&index_path, r#"{"weight_map":{"a":"linked.safetensors"}}"#).unwrap();
+
+        assert!(read_sharded_tensor_manifest(&index_path)
+            .unwrap_err()
+            .contains("symlink"));
+        assert!(load_native_sharded(&index_path)
+            .unwrap_err()
+            .contains("symlink"));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use thiserror::Error;
 
-use crate::manifest::{LoaderManifest, ManifestDType, ManifestError, PackAxis, TensorManifest};
+use crate::manifest::{
+    LoaderManifest, ManifestDType, ManifestError, PackAxis, QuantizationRole, TensorManifest,
+};
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum W4Error {
@@ -38,6 +40,7 @@ struct ExpectedTensor {
     name: &'static str,
     shape: &'static [usize],
     dtype: ManifestDType,
+    role: QuantizationRole,
     axis: PackAxis,
     group_size: Option<usize>,
 }
@@ -47,6 +50,7 @@ const EXPECTED: &[ExpectedTensor] = &[
         name: "k_proj.weight_packed",
         shape: &[1024, 640],
         dtype: ManifestDType::I32,
+        role: QuantizationRole::PackedWeight,
         axis: PackAxis::K,
         group_size: None,
     },
@@ -54,6 +58,7 @@ const EXPECTED: &[ExpectedTensor] = &[
         name: "k_proj.weight_scale",
         shape: &[1024, 160],
         dtype: ManifestDType::BF16,
+        role: QuantizationRole::Scale,
         axis: PackAxis::K,
         group_size: Some(32),
     },
@@ -61,6 +66,7 @@ const EXPECTED: &[ExpectedTensor] = &[
         name: "k_proj.weight_zero_point",
         shape: &[128, 160],
         dtype: ManifestDType::I32,
+        role: QuantizationRole::ZeroPoint,
         axis: PackAxis::N,
         group_size: Some(32),
     },
@@ -68,6 +74,7 @@ const EXPECTED: &[ExpectedTensor] = &[
         name: "down_proj.weight_packed",
         shape: &[5120, 2176],
         dtype: ManifestDType::I32,
+        role: QuantizationRole::PackedWeight,
         axis: PackAxis::K,
         group_size: None,
     },
@@ -75,6 +82,7 @@ const EXPECTED: &[ExpectedTensor] = &[
         name: "down_proj.weight_scale",
         shape: &[5120, 544],
         dtype: ManifestDType::BF16,
+        role: QuantizationRole::Scale,
         axis: PackAxis::K,
         group_size: Some(32),
     },
@@ -82,6 +90,7 @@ const EXPECTED: &[ExpectedTensor] = &[
         name: "down_proj.weight_zero_point",
         shape: &[640, 544],
         dtype: ManifestDType::I32,
+        role: QuantizationRole::ZeroPoint,
         axis: PackAxis::N,
         group_size: Some(32),
     },
@@ -96,6 +105,34 @@ pub fn validate_qwen35_w4_inventory(manifest: &LoaderManifest) -> Result<(), W4E
         compare(expected, actual)?;
     }
     Ok(())
+}
+
+pub fn build_qwen35_w4_layer_manifest(
+    prefix: &str,
+    inventory: &[TensorManifest],
+) -> Result<LoaderManifest, W4Error> {
+    let mut tensors = Vec::with_capacity(EXPECTED.len());
+    for expected in EXPECTED {
+        let full_name = format!("{prefix}.{}", expected.name);
+        let source = inventory
+            .iter()
+            .find(|tensor| tensor.name == full_name)
+            .ok_or_else(|| W4Error::MissingTensor(full_name.clone()))?;
+        let mut normalized = source.clone();
+        normalized.name = expected.name.to_owned();
+        normalized.pack_axis = Some(expected.axis);
+        normalized.group_size = expected.group_size;
+        normalized.quantization_role = Some(expected.role);
+        tensors.push(normalized);
+    }
+    let manifest = LoaderManifest {
+        schema: crate::manifest::LOADER_MANIFEST_SCHEMA.to_owned(),
+        revision: crate::manifest::QWEN35_MODEL_REVISION.to_owned(),
+        vocab_size: crate::manifest::QWEN35_MODEL_VOCAB_SIZE,
+        tensors,
+    };
+    validate_qwen35_w4_inventory(&manifest)?;
+    Ok(manifest)
 }
 
 fn compare(expected: &ExpectedTensor, actual: &TensorManifest) -> Result<(), W4Error> {
@@ -113,6 +150,14 @@ fn compare(expected: &ExpectedTensor, actual: &TensorManifest) -> Result<(), W4E
             "dtype",
             &expected.dtype,
             &actual.dtype,
+        ));
+    }
+    if actual.quantization_role != Some(expected.role) {
+        return Err(inventory_error(
+            expected.name,
+            "quantization_role",
+            &Some(expected.role),
+            &actual.quantization_role,
         ));
     }
     if actual.pack_axis != Some(expected.axis) {
@@ -211,7 +256,9 @@ pub fn dequantize_grouped(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::{LoaderManifest, QWEN35_MODEL_VOCAB_SIZE};
+    use crate::manifest::{
+        LoaderManifest, LOADER_MANIFEST_SCHEMA, QWEN35_MODEL_REVISION, QWEN35_MODEL_VOCAB_SIZE,
+    };
 
     fn required_tensors() -> Vec<TensorManifest> {
         EXPECTED
@@ -220,6 +267,7 @@ mod tests {
                 name: expected.name.to_owned(),
                 shape: expected.shape.to_vec(),
                 dtype: expected.dtype.clone(),
+                quantization_role: Some(expected.role),
                 pack_axis: Some(expected.axis),
                 group_size: expected.group_size,
             })
@@ -228,8 +276,8 @@ mod tests {
 
     fn manifest() -> LoaderManifest {
         LoaderManifest {
-            schema: "apxinf.loader-manifest.v1".to_owned(),
-            revision: "revision-1".to_owned(),
+            schema: LOADER_MANIFEST_SCHEMA.to_owned(),
+            revision: QWEN35_MODEL_REVISION.to_owned(),
             vocab_size: QWEN35_MODEL_VOCAB_SIZE,
             tensors: required_tensors(),
         }
@@ -264,6 +312,7 @@ mod tests {
             ("down_proj.weight_packed", 0usize, "shape"),
             ("k_proj.weight_scale", 1usize, "dtype"),
             ("down_proj.weight_zero_point", 2usize, "group_size"),
+            ("k_proj.weight_packed", 3usize, "quantization_role"),
         ] {
             let mut value = manifest();
             let tensor = value
@@ -274,7 +323,8 @@ mod tests {
             match mutate {
                 0 => tensor.shape[1] += 1,
                 1 => tensor.dtype = ManifestDType::F16,
-                _ => tensor.group_size = Some(64),
+                2 => tensor.group_size = Some(64),
+                _ => tensor.quantization_role = Some(QuantizationRole::Scale),
             }
             assert!(matches!(
                 validate_qwen35_w4_inventory(&value),
@@ -291,6 +341,29 @@ mod tests {
             validate_qwen35_w4_inventory(&value),
             Err(W4Error::Manifest(_))
         ));
+    }
+
+    #[test]
+    fn header_inventory_bridge_normalizes_one_layer_and_validates_it() {
+        let prefix = "model.layers.0.self_attn";
+        let raw = EXPECTED
+            .iter()
+            .map(|expected| TensorManifest {
+                name: format!("{prefix}.{}", expected.name),
+                shape: expected.shape.to_vec(),
+                dtype: expected.dtype.clone(),
+                quantization_role: None,
+                pack_axis: None,
+                group_size: None,
+            })
+            .collect::<Vec<_>>();
+        let normalized = build_qwen35_w4_layer_manifest(prefix, &raw).unwrap();
+        validate_qwen35_w4_inventory(&normalized).unwrap();
+        assert_eq!(normalized.tensors[0].name, "k_proj.weight_packed");
+        assert_eq!(
+            normalized.tensors[0].quantization_role,
+            Some(QuantizationRole::PackedWeight)
+        );
     }
 
     #[test]

@@ -11,9 +11,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
+import struct
 from typing import Any, Iterable, Sequence
 
 
@@ -348,9 +350,13 @@ def build_job(
     job["artifacts"] = _build_artifacts(normalized_layers, normalized_stages, model)
     identity = {
         "generator_sha256": job["generator"]["sha256"],
+        "contract_sha256": job["contract_sha256"],
         "model_revision": model["revision"],
+        "config_sha256": model["config_sha256"],
+        "generation_config_sha256": model["generation_config_sha256"],
         "input_manifest_sha256": job["input"]["sha256"],
         "selection": selection,
+        "generation": generation,
         "schema": job["schema"],
     }
     job["artifact_identity_sha256"] = sha256_bytes(canonical_bytes(identity))
@@ -378,6 +384,12 @@ def _schema_document(job: dict[str, Any]) -> dict[str, Any]:
                 "range": [0, MODEL_VOCAB_SIZE - 1],
             },
             "decoded_text": {"type": "string", "special_tokens_skipped": True},
+        },
+        "artifact_report_schema": {
+            "schema": "apxinf.oracle-artifact-report.v1",
+            "generation_required": ["completion_tokens", "stop_reason"],
+            "logits_generation_required": ["top1_top2_margin"],
+            "gdn_record_required": ["required_dimensions"],
         },
         "comparison": {
             "tokens": "exact",
@@ -443,11 +455,19 @@ def write_manifest_bundle(job: dict[str, Any], output_dir: Path | str) -> Path:
     return manifest_path
 
 
-def _validate_shape(actual: object, expected: list[Any], file_name: str) -> list[int]:
+def _validate_shape(
+    actual: object,
+    expected: list[Any],
+    symbols: dict[str, int],
+    file_name: str,
+) -> list[int]:
     if not isinstance(actual, list) or not actual:
         raise ValueError(f"artifact {file_name} shape must be a non-empty array")
-    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in actual):
-        raise ValueError(f"artifact {file_name} shape must contain nonnegative integers")
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in actual
+    ):
+        raise ValueError(f"artifact {file_name} shape must contain positive integers")
     if expected != ["runner_resolved"] and len(actual) != len(expected):
         raise ValueError(
             f"artifact {file_name} rank mismatch: expected {len(expected)}, got {len(actual)}"
@@ -457,17 +477,42 @@ def _validate_shape(actual: object, expected: list[Any], file_name: str) -> list
             raise ValueError(
                 f"artifact {file_name} shape mismatch: expected dimension {expected_dimension}, got {actual_dimension}"
             )
+        if isinstance(expected_dimension, str):
+            expected_value = symbols.get(expected_dimension)
+            if expected_value is not None and expected_value != actual_dimension:
+                raise ValueError(
+                    f"artifact {file_name} shape mismatch: {expected_dimension} expected {expected_value}, got {actual_dimension}"
+                )
     return actual
 
 
-def _validate_token_artifact(path: Path, shape: list[int], max_new_tokens: int) -> None:
+def _validate_f32_artifact(path: Path, shape: list[int], file_name: str) -> None:
+    elements = 1
+    for dimension in shape:
+        elements *= dimension
+    expected_bytes = elements * 4
+    if path.stat().st_size != expected_bytes:
+        raise ValueError(f"artifact {file_name} byte length does not match F32 shape")
+    with path.open("rb") as handle:
+        for index in range(elements):
+            value = struct.unpack("<f", handle.read(4))[0]
+            if not math.isfinite(value):
+                raise ValueError(f"artifact {file_name} contains non-finite value at {index}")
+
+
+def _validate_token_artifact(
+    path: Path,
+    shape: list[int],
+    completion_tokens: int,
+    stop_reason: str,
+) -> None:
     value = read_json(path)
     if value.get("schema") != "apxinf.oracle-tokens.v1":
         raise ValueError("output-tokens.json has an invalid schema")
     token_ids = value.get("output_token_ids")
     if not isinstance(token_ids, list):
         raise ValueError("output-tokens.json output_token_ids must be an array")
-    if len(token_ids) > max_new_tokens or shape != [len(token_ids)]:
+    if not token_ids or len(token_ids) != completion_tokens or shape != [len(token_ids)]:
         raise ValueError("output-tokens.json token count does not match metadata")
     if any(
         isinstance(token, bool)
@@ -479,6 +524,51 @@ def _validate_token_artifact(path: Path, shape: list[int], max_new_tokens: int) 
         raise ValueError("output-tokens.json contains an invalid model token")
     if not isinstance(value.get("decoded_text"), str):
         raise ValueError("output-tokens.json decoded_text must be a string")
+    eos_positions = [index for index, token in enumerate(token_ids) if token in EOS_TOKEN_IDS]
+    if stop_reason == "eos":
+        if not eos_positions or eos_positions[0] != len(token_ids) - 1:
+            raise ValueError("EOS stop must end with exactly one EOS token")
+    elif eos_positions:
+        if eos_positions[0] != len(token_ids) - 1:
+            raise ValueError("output-tokens.json contains tokens after EOS")
+
+
+def _validate_report_generation(
+    report: dict[str, Any], max_new_tokens: int, requires_margin: bool
+) -> tuple[int, str]:
+    report_generation = report.get("generation")
+    if not isinstance(report_generation, dict):
+        raise ValueError("runner artifact report generation metadata is required")
+    completion_tokens = report_generation.get("completion_tokens")
+    stop_reason = report_generation.get("stop_reason")
+    if (
+        isinstance(completion_tokens, bool)
+        or not isinstance(completion_tokens, int)
+        or completion_tokens <= 0
+        or completion_tokens > max_new_tokens
+    ):
+        raise ValueError("runner completion_tokens must be within the requested budget")
+    if stop_reason not in {"eos", "budget"}:
+        raise ValueError("runner stop_reason must be eos or budget")
+    if stop_reason == "budget" and completion_tokens != max_new_tokens:
+        raise ValueError("output tokens must consume the budget or end with EOS")
+    if requires_margin:
+        margins = report_generation.get("top1_top2_margin")
+        if (
+            not isinstance(margins, list)
+            or len(margins) != completion_tokens
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or value < 0
+                for value in margins
+            )
+        ):
+            raise ValueError(
+                "runner logits report requires one finite nonnegative top1/top2 margin per completion token"
+            )
+    return completion_tokens, stop_reason
 
 
 def run_runner(
@@ -493,6 +583,25 @@ def run_runner(
     pending = read_json(artifact_manifest_path)
     if job.get("status") != "manifest_only" or pending.get("status") != "pending":
         raise ValueError("oracle bundle is not in manifest-only pending state")
+    model = job.get("model")
+    if not isinstance(model, dict):
+        raise ValueError("job manifest model metadata is invalid")
+    model_dir = Path(str(model.get("model_dir", "")))
+    metadata_files = {
+        "config.json": model.get("config_sha256"),
+        "generation_config.json": model.get("generation_config_sha256"),
+    }
+    for name, expected_sha in metadata_files.items():
+        path = model_dir / name
+        if path.is_symlink() or not path.is_file() or sha256_file(path) != expected_sha:
+            raise ValueError(f"model metadata SHA256 mismatch for {name}")
+    contract_path = Path(__file__).resolve().parents[2] / "benchmarks/qwen38_4090/evaluation/contract-v1.json"
+    if (
+        contract_path.is_symlink()
+        or not contract_path.is_file()
+        or sha256_file(contract_path) != job.get("contract_sha256")
+    ):
+        raise ValueError("evaluation contract SHA256 mismatch")
     control_hashes = job.get("control_files")
     if not isinstance(control_hashes, dict) or set(control_hashes) != set(
         CONTROL_FILE_NAMES
@@ -506,7 +615,7 @@ def run_runner(
             raise ValueError(f"control file {name} SHA256 does not match job manifest")
     job_manifest_sha = sha256_file(job_path)
     artifact_dir = root / str(job.get("artifact_directory", "artifacts"))
-    if not artifact_dir.is_dir() or any(artifact_dir.iterdir()):
+    if artifact_dir.is_symlink() or not artifact_dir.is_dir() or any(artifact_dir.iterdir()):
         raise ValueError("oracle artifact directory must exist and be empty before runner execution")
 
     environment = os.environ.copy()
@@ -520,6 +629,9 @@ def run_runner(
     )
     if completed.returncode != 0:
         raise RuntimeError(f"oracle runner exited with status {completed.returncode}")
+
+    if artifact_dir.is_symlink() or not artifact_dir.is_dir():
+        raise ValueError("runner replaced artifact directory")
 
     if sha256_file(job_path) != job_manifest_sha:
         raise ValueError("runner modified job-manifest.json")
@@ -553,6 +665,12 @@ def run_runner(
     records = report.get("artifacts")
     if not isinstance(records, list):
         raise ValueError("runner artifact report artifacts must be an array")
+    max_new_tokens = int(read_json(root / "generation.json")["max_new_tokens"])
+    completion_tokens, stop_reason = _validate_report_generation(
+        report,
+        max_new_tokens,
+        any(item.get("schema_ref") == "logits" for item in pending.get("artifacts", [])),
+    )
     by_name: dict[str, dict[str, Any]] = {}
     for record in records:
         if not isinstance(record, dict) or not isinstance(record.get("file"), str):
@@ -566,30 +684,33 @@ def run_runner(
 
     completed_artifacts = []
     generation = read_json(root / "generation.json")
+    prompt_tokens = len(read_json(root / "input-manifest.json")["input_ids"])
+    symbols = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "trajectory_tokens": prompt_tokens + completion_tokens,
+    }
     for name, declaration in sorted(expected.items()):
         record = by_name[name]
         if record.get("schema_ref") != declaration["schema_ref"]:
             raise ValueError(f"artifact {name} schema_ref does not match declaration")
         if record.get("dtype") != declaration["dtype"]:
             raise ValueError(f"artifact {name} dtype does not match declaration")
-        shape = _validate_shape(record.get("shape"), declaration["shape"], name)
+        if declaration["schema_ref"] == "gdn_state" and record.get(
+            "required_dimensions"
+        ) != declaration.get("required_dimensions"):
+            raise ValueError(f"artifact {name} GDN dimensions do not match declaration")
+        shape = _validate_shape(record.get("shape"), declaration["shape"], symbols, name)
         artifact_path = artifact_dir / name
         actual_sha = sha256_file(artifact_path)
         if record.get("sha256") != actual_sha:
             raise ValueError(f"artifact {name} SHA256 does not match report")
         if declaration["dtype"] == "json":
             _validate_token_artifact(
-                artifact_path, shape, int(generation["max_new_tokens"])
+                artifact_path, shape, completion_tokens, stop_reason
             )
         else:
-            elements = 1
-            for dimension in shape:
-                elements *= dimension
-            expected_bytes = elements * 4
-            if artifact_path.stat().st_size != expected_bytes:
-                raise ValueError(
-                    f"artifact {name} byte length does not match F32 shape"
-                )
+            _validate_f32_artifact(artifact_path, shape, name)
         completed_artifacts.append(
             {
                 **declaration,

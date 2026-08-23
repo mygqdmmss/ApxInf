@@ -47,10 +47,14 @@ APXINF_ORACLE_OUTPUT_DIR=/absolute/path/artifacts
 
 It must write exactly the files declared by `artifact-manifest.json` plus
 `artifact-report.json`. The report schema is
-`apxinf.oracle-artifact-report.v1`; every artifact record contains `file`,
-`schema_ref`, `dtype`, fully resolved integer `shape`, and `sha256`. Missing,
-extra, duplicate, wrong-shard, dtype/schema/shape/hash, invalid token, byte-size,
-or nonzero-runner cases fail before the bundle is marked complete.
+`apxinf.oracle-artifact-report.v1`; it must include
+`generation: {completion_tokens, stop_reason}` where `stop_reason` is `eos` or
+`budget`. Every artifact record contains `file`, `schema_ref`, `dtype`, fully
+resolved positive integer `shape`, and `sha256`. Missing, extra, duplicate,
+wrong-shard, dtype/schema/shape/hash, invalid token, byte-size, non-finite F32,
+early-stop/EOS-policy, metadata-drift, symlink, or nonzero-runner cases fail
+before the bundle is marked complete. The runner cannot replace the
+`artifacts/` directory or mutate control manifests.
 
 The real checkpoint runner, GPU UUID, peak VRAM, raw artifact hashes, and any
 approved export are recorded by member1 in
