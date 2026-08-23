@@ -61,6 +61,14 @@ pub struct Qwen35CheckpointInventory {
     tensor_shards: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PackedLinearPayload {
+    pub layout: PackedLinearLayout,
+    pub weight_packed: Vec<u32>,
+    pub scales_bf16: Vec<half::bf16>,
+    pub zero_points: Vec<u32>,
+}
+
 impl Qwen35CheckpointInventory {
     pub fn from_checkpoint_dir(
         dir: impl AsRef<Path>,
@@ -312,6 +320,24 @@ impl Qwen35CheckpointInventory {
         &self,
         base: &str,
     ) -> Result<PackedLinearReference, Qwen35LoaderError> {
+        let payload = self.read_packed_linear_payload(base)?;
+        Ok(PackedLinearReference {
+            layout: payload.layout,
+            weight_packed: payload.weight_packed,
+            scales: payload
+                .scales_bf16
+                .into_iter()
+                .map(half::bf16::to_f32)
+                .collect(),
+            zero_points: payload.zero_points,
+        })
+    }
+
+    /// Read a W4 projection while retaining scales in their native BF16 form.
+    pub fn read_packed_linear_payload(
+        &self,
+        base: &str,
+    ) -> Result<PackedLinearPayload, Qwen35LoaderError> {
         let shape_name = format!("{base}.weight_shape");
         let shape_manifest = self.tensor_manifest_or_projection(base, "weight_shape")?;
         if shape_manifest.shape != [2] {
@@ -392,10 +418,10 @@ impl Qwen35CheckpointInventory {
                 source,
             })?;
         let weight_packed = self.read_tensor_u32(&packed_name)?;
-        let scales = self.read_tensor_bf16_f32(&scale_name)?;
+        let scales_bf16 = self.read_tensor_bf16(&scale_name)?;
         let zero_points = self.read_tensor_u32(&zero_point_name)?;
         if weight_packed.len() != out_features * layout.packed_k_columns()
-            || scales.len() != out_features * layout.groups()
+            || scales_bf16.len() != out_features * layout.groups()
             || zero_points.len() != layout.packed_n_rows() * layout.groups()
         {
             return Err(Qwen35LoaderError::ProjectionShape {
@@ -403,16 +429,19 @@ impl Qwen35CheckpointInventory {
                 details: "payload lengths do not match manifest shapes".into(),
             });
         }
-        if let Some(index) = scales.iter().position(|value| !value.is_finite()) {
+        if let Some(index) = scales_bf16
+            .iter()
+            .position(|value| !value.to_f32().is_finite())
+        {
             return Err(Qwen35LoaderError::ProjectionShape {
                 base: base.to_owned(),
                 details: format!("scale payload at index {index} is not finite"),
             });
         }
-        Ok(PackedLinearReference {
+        Ok(PackedLinearPayload {
             layout,
             weight_packed,
-            scales,
+            scales_bf16,
             zero_points,
         })
     }
@@ -448,6 +477,26 @@ impl Qwen35CheckpointInventory {
         Ok(bytes
             .chunks_exact(8)
             .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect())
+    }
+
+    fn read_tensor_bf16(&self, name: &str) -> Result<Vec<half::bf16>, Qwen35LoaderError> {
+        let manifest = self.tensor_manifest(name)?;
+        if manifest.dtype != ManifestDType::BF16 {
+            return Err(Qwen35LoaderError::UnsupportedDType {
+                name: name.to_owned(),
+                dtype: manifest.dtype.clone(),
+            });
+        }
+        let bytes = self.read_tensor_bytes(name)?;
+        if bytes.len() % 2 != 0 {
+            return Err(Qwen35LoaderError::Inventory(format!(
+                "BF16 tensor `{name}` byte length is not divisible by 2"
+            )));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|chunk| half::bf16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())))
             .collect())
     }
 

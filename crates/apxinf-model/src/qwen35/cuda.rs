@@ -18,7 +18,7 @@ impl Qwen35CheckpointProjection {
         base: &str,
     ) -> Result<Self, String> {
         let host = inventory
-            .read_packed_linear(base)
+            .read_packed_linear_payload(base)
             .map_err(|error| format!("load Qwen3.5 projection `{base}`: {error}"))?;
         let layout = Qwen35W4Layout::new(
             host.layout.out_features,
@@ -31,15 +31,9 @@ impl Qwen35CheckpointProjection {
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect::<Vec<_>>();
-        let scale_values = host
-            .scales
-            .iter()
-            .copied()
-            .map(bf16::from_f32)
-            .collect::<Vec<_>>();
         let scales = Tensor::from_bf16(
             Shape::new(vec![layout.out_features, layout.groups()]),
-            &scale_values,
+            &host.scales_bf16,
         )
         .map_err(|error| format!("create Qwen3.5 BF16 scales: {error}"))?;
         let zero_point_bytes = host
