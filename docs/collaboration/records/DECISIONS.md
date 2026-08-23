@@ -19,6 +19,8 @@
 | D-015 | 2026-08-23 | 四个 GPU 只作为逻辑 lane；服务器所有真实 GPU/模型任务通过全局锁串行队列，优先级为 oracle → GPU0 base → GPU2 kernel → GPU3 bonus | 单账号/单工作树拓扑与最终方案原“四卡并行常驻”表述冲突；本地代码可并行，服务器证据不可并行占用 | 成员1 | accepted |
 | D-016 | 2026-08-24 | ProtocolRuntime adapter 分层放在顶层 server crate；model crate 只暴露 checkpoint/session 所需的中立接口，避免 apxinf-model 反向依赖 HTTP/server trait | `TokenStream`/`ProtocolRuntime` 定义在 `src/server/service.rs`；保持模型库可复用并确保生产 adapter 真正增量 | 成员1 | accepted |
 | D-017 | 2026-08-24 | strict `serve` 在真实 checkpoint-backed CUDA executor 接入前必须拒绝启动，不得把 synthetic callback、旧 CPU CLI 或 protocol stub 暴露为生产 runtime | 当前只有 synthetic executor control plane 和 transport；无真实 CUDA forward 证据时 fail-closed 比伪造 RUNTIME_READY 安全 | 成员1 | accepted |
+| D-018 | 2026-08-24 | 真实 W4 projection adapter 必须保留 checkpoint scale 的 BF16 表示，packed weight/zero-point 以有界 raw bytes 上传；不得把完整 checkpoint 展开为 BF16/F32 副本 | GPU2 layer-0 `in_proj_qkv` 已在 CPU K/N-packed reference 对比通过；native scale 路径由 `3274f38` 固化 | 成员1 | accepted |
+| D-019 | 2026-08-24 | GPU2 单投影验证只记录为 development evidence，不得标记 BASE_CORRECT/BASE_GOOD/FORMAL_READY，也不得提前占用 GPU0 | 当前证据仅覆盖 layer-0 W4 projection，full-attention/GDN/64-layer executor/serve 尚未接通；artifact manifest 已通过 sha256sum -c | 成员1 | accepted |
 
 ## 新决策模板
 

@@ -16,7 +16,7 @@
 | M2-O0 | 成员2 + 成员1 | oracle generator、checkpoint manifest、选择性 layer golden、hidden 代理集 | done | `46182a1167570e7595b3e658b02fb8acadac9f7a` | GPU1 queue `P0-oracle-20260823T095000Z` 成功；峰值 20942 MiB；artifact `/mnt/chuangxin/team2/artifacts/apxinf/oracle/63768c10df38c0395e12ef49edac1bd539eaeeea/46182a1167570e7595b3e658b02fb8acadac9f7a/` |
 | M2-L0 | 成员2 | synthetic W4 pack/unpack fixture 与 loader 方向性测试 | integrated | `d26738f` | loader 26/26；K-packed weight、group-32 scale、N-packed zero-point manifest validation 已集成 |
 | M1-R1 | 成员1 | runtime adapter、bounded GPU worker、device-budget admission | active | `2505b09` | 增量 single-owner ProtocolRuntime transport 已通过 4 项 focused tests；真实 checkpoint CUDA step executor 尚未接入，stub=false 仍未启用 |
-| M1-C0 | 成员1 | Qwen35 loader/model/state/GDN/full-attention vertical slice | active | `cdd7c3c` | config `cb19aaa`、lazy payload loader `cdd7c3c`、W4 `ad9d0e8`、attention `db1c610`、GDN `c8521dc`、executor control `a8cf827`；尚未达到 REFERENCE_LAYER |
+| M1-C0 | 成员1 | Qwen35 loader/model/state/GDN/full-attention vertical slice | active | `9920468` | `2b36aff` real packed loader、`cfa1206` CUDA device W4 projection、`3274f38` native BF16 scale preservation、`9920468` layer-3 full-attention assembly；GPU2 单投影 evidence 通过，尚未达到 REFERENCE_LAYER |
 | M1-S0 | 成员1 | strict Qwen3.5 production serve validation | active | `cddde59` | `--model/--revision/--gpu-uuid/--bind/--max-model-len/--queue-capacity` 校验及 2 项 focused tests；真实 CUDA executor 未链接时明确拒绝启动 |
 | M3-E0 | 成员3 | W4/GEMV/Graph baseline 与 paired benchmark harness | planned | - | 本地静态准备，服务器由成员1在 GPU2 replay |
 | M3-B0 | 成员3 | 显存账本、context/C4/C8/MTP/vision bonus evidence | planned | - | 文本 BASE_GOOD 后逐项开启 |
