@@ -3,7 +3,9 @@ use half::bf16;
 use apxinf_core::storage::GpuStorageHandle;
 use apxinf_core::{DType, Device, Error, Shape, Storage, Tensor};
 
-use crate::kernels::qwen35_w4::{project_bf16, Qwen35W4Buffers, Qwen35W4Layout};
+use crate::kernels::qwen35_w4::{
+    project_bf16, Qwen35W4Buffers, Qwen35W4DeviceProjection, Qwen35W4Layout,
+};
 use crate::test_util::{assert_bf16_close_reduction, download_bf16_as_fp32, upload_fp32_as_bf16};
 use crate::{CudaBuffer, CudaContext};
 
@@ -90,6 +92,39 @@ fn qwen35_w4_cuda_projection_matches_k_and_n_packed_cpu_reference() {
         layout,
     )
     .unwrap();
+    assert_bf16_close_reduction(&download_bf16_as_fp32(&output).unwrap(), &expected);
+}
+
+#[test]
+fn qwen35_w4_device_projection_owns_uploaded_w4_payloads() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let layout = Qwen35W4Layout::new(2, 3, 32).unwrap();
+    let activation_values = [1.0, -0.5, 2.0];
+    let weights = [0x0000_0321u32, 0x0000_0765u32];
+    let scale_values = [0.25f32, 0.5f32];
+    let zero_points = [0x0000_0021u32];
+    let expected = cpu_reference(
+        layout,
+        &activation_values,
+        &weights,
+        &scale_values,
+        &zero_points,
+    );
+    let scale_values: Vec<bf16> = scale_values.iter().copied().map(bf16::from_f32).collect();
+    let scales = Tensor::from_bf16(vec![2, 1], &scale_values).unwrap();
+    let projection = Qwen35W4DeviceProjection::upload(
+        &ctx,
+        layout,
+        &weights.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>(),
+        &scales,
+        &zero_points
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let activation = upload_fp32_as_bf16(&ctx, &activation_values, vec![1, 3]).unwrap();
+    let output = projection.project(&ctx, &activation).unwrap();
     assert_bf16_close_reduction(&download_bf16_as_fp32(&output).unwrap(), &expected);
 }
 

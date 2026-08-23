@@ -71,6 +71,90 @@ pub struct Qwen35W4Buffers<'a> {
     pub zero_points: &'a CudaBuffer,
 }
 
+/// Owns the device-side buffers for one bounded W4 projection.
+///
+/// Packed weights and zero-points remain raw I32-compatible bytes because the
+/// core tensor dtype set intentionally has no I32 variant. Scales are uploaded
+/// as native BF16 and are never expanded to a full-precision model copy.
+pub struct Qwen35W4DeviceProjection {
+    layout: Qwen35W4Layout,
+    weight_packed: CudaBuffer,
+    scales: Tensor,
+    zero_points: CudaBuffer,
+}
+
+impl Qwen35W4DeviceProjection {
+    pub fn upload(
+        ctx: &CudaContext,
+        layout: Qwen35W4Layout,
+        weight_packed: &[u8],
+        scales_cpu: &Tensor,
+        zero_points: &[u8],
+    ) -> Result<Self> {
+        let expected_weight_bytes = layout.weight_bytes()?;
+        let expected_zero_point_bytes = layout.zero_point_bytes()?;
+        if weight_packed.len() != expected_weight_bytes {
+            return Err(Error::Other(format!(
+                "Qwen3.5 W4 packed weight requires {expected_weight_bytes} bytes, got {}",
+                weight_packed.len()
+            )));
+        }
+        if zero_points.len() != expected_zero_point_bytes {
+            return Err(Error::Other(format!(
+                "Qwen3.5 W4 zero-point requires {expected_zero_point_bytes} bytes, got {}",
+                zero_points.len()
+            )));
+        }
+        let expected_scale_shape = [layout.out_features, layout.groups()];
+        if scales_cpu.device() != Device::Cpu
+            || scales_cpu.dtype() != DType::BF16
+            || scales_cpu.shape().dims() != expected_scale_shape
+        {
+            return Err(Error::Other(format!(
+                "Qwen3.5 W4 CPU scales must be BF16 {:?}, got {:?} {} on {:?}",
+                expected_scale_shape,
+                scales_cpu.shape().dims(),
+                scales_cpu.dtype(),
+                scales_cpu.device()
+            )));
+        }
+        let weight_buffer = CudaBuffer::alloc(expected_weight_bytes, ctx.device_id())
+            .map_err(Error::Cuda)?;
+        weight_buffer
+            .copy_from_host(weight_packed)
+            .map_err(Error::Cuda)?;
+        let zero_point_buffer = CudaBuffer::alloc(expected_zero_point_bytes, ctx.device_id())
+            .map_err(Error::Cuda)?;
+        zero_point_buffer
+            .copy_from_host(zero_points)
+            .map_err(Error::Cuda)?;
+        let scales = crate::transfers::to_cuda(scales_cpu, ctx.device_id())?;
+        Ok(Self {
+            layout,
+            weight_packed: weight_buffer,
+            scales,
+            zero_points: zero_point_buffer,
+        })
+    }
+
+    pub const fn layout(&self) -> Qwen35W4Layout {
+        self.layout
+    }
+
+    pub fn project(&self, ctx: &CudaContext, activation: &Tensor) -> Result<Tensor> {
+        project_bf16(
+            ctx,
+            activation,
+            Qwen35W4Buffers {
+                weight_packed: &self.weight_packed,
+                scales: &self.scales,
+                zero_points: &self.zero_points,
+            },
+            self.layout,
+        )
+    }
+}
+
 pub fn project_bf16(
     ctx: &CudaContext,
     activation: &Tensor,
