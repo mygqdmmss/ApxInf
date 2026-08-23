@@ -1,9 +1,11 @@
 use thiserror::Error;
 
-use crate::manifest::{LoaderManifest, ManifestDType, PackAxis, TensorManifest};
+use crate::manifest::{LoaderManifest, ManifestDType, ManifestError, PackAxis, TensorManifest};
 
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum W4Error {
+    #[error("invalid loader manifest: {0}")]
+    Manifest(#[from] ManifestError),
     #[error("missing required tensor `{0}`")]
     MissingTensor(String),
     #[error("tensor `{name}` expected {field} {expected}, got {actual}")]
@@ -86,6 +88,7 @@ const EXPECTED: &[ExpectedTensor] = &[
 ];
 
 pub fn validate_qwen35_w4_inventory(manifest: &LoaderManifest) -> Result<(), W4Error> {
+    manifest.validate()?;
     for expected in EXPECTED {
         let actual = manifest
             .tensor(expected.name)
@@ -278,6 +281,16 @@ mod tests {
                 Err(W4Error::Inventory { field: actual, .. }) if actual == field
             ));
         }
+    }
+
+    #[test]
+    fn inventory_rejects_invalid_manifest_identity() {
+        let mut value = manifest();
+        value.vocab_size = 248_044;
+        assert!(matches!(
+            validate_qwen35_w4_inventory(&value),
+            Err(W4Error::Manifest(_))
+        ));
     }
 
     #[test]
