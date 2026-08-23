@@ -8,6 +8,14 @@
 
 **Tech Stack:** Rust 2021, `std::net`, `serde_json`, existing `clap` and `apxinf-model`, Python 3 standard library, Cargo unit tests.
 
+## Execution Status (2026-08-23)
+
+- Tasks 1-4: complete in commits `dec5549`, `30a4007`, and `f989214`.
+- Task 5 probe implementation: complete in `c1e05b7`; live evidence is
+  recorded separately and binds to that source commit.
+- Task 6 verification: complete locally; production runtime integration and
+  GPU correctness/reliability evidence remain member1 responsibilities.
+
 ---
 
 ### Task 1: Add the request schema and admission tests
