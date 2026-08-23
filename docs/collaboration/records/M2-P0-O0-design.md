@@ -107,6 +107,60 @@ Runtime errors are request-scoped; a subsequent health probe and short request
 must still succeed. The stub exposes deterministic fake outputs only for
 protocol testing and does not claim model correctness.
 
+### Incremental Generation Invariants
+
+`ActiveGeneration` is the only owner of a request's real `TokenStream`. It
+contains the request ID, prompt count, requested output budget, EOS policy,
+actual output IDs, completion state, and the runtime stream. Its state machine
+is `started -> token* -> {eos, eof, budget, cancelled, error} -> finished`.
+Both the JSON collector and HTTP SSE writer call the same one-token transition;
+the HTTP layer never receives a precomputed frame list or a separate
+cancellation token.
+
+The transition includes the first EOS when EOS is honored, then cancels the
+real stream. Reaching the requested output budget also cancels the real stream
+unless natural EOF had already completed it. Explicit client disconnect and
+the `Drop` path cancel any unfinished stream. Therefore each started request
+has one observable runtime cancellation route and cannot retain a worker/KV
+permit after a response path exits early.
+
+SSE serializes each returned token immediately with its consecutive index. A
+runtime error before any body frame maps to the ordinary HTTP error response;
+after the `200 text/event-stream` headers and at least one frame, it emits one
+`type: "error"` SSE event and closes without a done event or `[DONE]`. It then
+cancels the same active generation. The service rejects a non-stream caller
+for a `stream=true` request and a stream caller for a `stream=false` request.
+
+The legacy `Fn(RuntimeRequest) -> RuntimeResult` adapter is fixture-only: it
+exists for compatibility tests but is not a production streaming adapter.
+Production integration must return a genuinely incremental stream and connect
+the runtime request cancellation handle to that stream. Health uses one
+capability snapshot per service, reports its model vocabulary explicitly, and
+marks hard-coded stub-only fields as fixture behavior; production integration
+must supply its actual fallback and modality state.
+
+### Design Self-Review Corrections
+
+The 2026-08-23 implementation review made the following invariants explicit:
+
+- `ProtocolService` fails closed if runtime capabilities report a vocabulary
+  other than model config vocab `248320`; a tokenizer vocab of `248044` cannot
+  silently enter health or admission.
+- an SSE runtime error is terminal state. After returning the error once,
+  subsequent polling returns no frame and can never produce a done event or
+  `[DONE]` sentinel.
+- the HTTP disconnect test uses a generation budget much larger than the
+  number of emitted frames before socket shutdown, and asserts cancellation
+  occurred before natural budget exhaustion.
+- the local gate probe reads the over-budget value from the live
+  `/health.max_model_len`, records the exact canonical request body, always
+  records both health rows, and writes a sibling SHA256 file for the evidence
+  JSON.
+
+These corrections do not broaden production claims: local health remains a
+stub fixture, and no reliability boolean, correctness result, checkpoint
+oracle, memory capacity, or GPU behavior is inferred from it.
+
 ## Protocol Evidence
 
 A standard-library probe records timestamp, commit SHA, request body, HTTP

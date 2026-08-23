@@ -186,7 +186,11 @@ Create `req-<number>`, convert validated input to `RuntimeRequest`, start the
 incremental stream, and map errors without exposing CUDA types. Provide one
 consumer for non-stream JSON and one iterator-style consumer for SSE; both stop
 after `max_new_tokens`, include the first EOS only when `ignore_eos=false`, and
-call `cancel()` when stopping before the runtime ends.
+call `cancel()` when stopping before the runtime ends. `ActiveGeneration` owns
+the real stream and cancels on EOS, budget exhaustion, disconnect, and drop;
+do not precompute SSE frames. Reject service mode mismatch. Before the first
+SSE body frame, runtime errors use normal HTTP mapping; after it, emit exactly
+one SSE `type:"error"` event, cancel, and close without done/sentinel.
 
 - [ ] **Step 4: Run GREEN and commit**
 
