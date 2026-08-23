@@ -2,6 +2,7 @@
 // Stable C ABI and CUDA launch adapter for custom static-inference operators.
 
 #include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #include <cuda_runtime.h>
 
@@ -11,6 +12,7 @@ namespace {
 #include "../kernels/custom/math.cuh"
 #include "../kernels/custom/reduction.cuh"
 #include "../kernels/custom/quantization.cuh"
+#include "../kernels/custom/qwen35_w4.cuh"
 #include "../kernels/custom/preprocess.cuh"
 #include "../kernels/custom/attention.cuh"
 #include "../kernels/custom/normalization.cuh"
@@ -20,6 +22,26 @@ namespace {
 #include "../kernels/custom/fused.cuh"
 #include "../kernels/custom/cache.cuh"
 }  // namespace
+
+extern "C" cudaError_t apxinf_static_qwen35_w4_project_bf16(
+    const void* activation, const void* weight_packed, const void* scales,
+    const void* zero_points, void* output, void* error_flags, int rows,
+    int out_features, int in_features, int group_size, cudaStream_t stream) {
+  if (activation == nullptr || weight_packed == nullptr || scales == nullptr ||
+      zero_points == nullptr || output == nullptr || error_flags == nullptr ||
+      rows <= 0 || out_features <= 0 || in_features <= 0 || group_size != 32) {
+    return cudaErrorInvalidValue;
+  }
+  qwen35_w4_project_bf16_kernel<<<rows * out_features, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(activation),
+      static_cast<const uint32_t*>(weight_packed),
+      static_cast<const __nv_bfloat16*>(scales),
+      static_cast<const uint32_t*>(zero_points),
+      static_cast<__nv_bfloat16*>(output),
+      static_cast<uint32_t*>(error_flags), rows, out_features, in_features,
+      group_size);
+  return cudaGetLastError();
+}
 
 extern "C" cudaError_t apxinf_static_evict_l2(
     void* buffer, size_t bytes, uint32_t seed, cudaStream_t stream) {

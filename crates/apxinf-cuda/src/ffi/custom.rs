@@ -5,6 +5,20 @@ use std::ffi::c_void;
 use super::cuda::{cudaError_t, cudaStream_t};
 
 extern "C" {
+    pub fn apxinf_static_qwen35_w4_project_bf16(
+        activation: *const c_void,
+        weight_packed: *const c_void,
+        scales: *const c_void,
+        zero_points: *const c_void,
+        output: *mut c_void,
+        error_flags: *mut c_void,
+        rows: i32,
+        out_features: i32,
+        in_features: i32,
+        group_size: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
     pub fn apxinf_static_evict_l2(
         buffer: *mut c_void,
         bytes: usize,
