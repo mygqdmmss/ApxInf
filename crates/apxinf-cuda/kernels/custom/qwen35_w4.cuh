@@ -40,6 +40,8 @@ __global__ void qwen35_w4_project_bf16_kernel(
   }
   if (threadIdx.x == 0) {
     if (!isfinite(partial[0])) atomicOr(error_flags, 2U);
-    output[output_index] = __float2bfloat16(partial[0]);
+    const __nv_bfloat16 converted = __float2bfloat16(partial[0]);
+    if (!isfinite(__bfloat162float(converted))) atomicOr(error_flags, 2U);
+    output[output_index] = converted;
   }
 }

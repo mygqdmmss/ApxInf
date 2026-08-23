@@ -1,6 +1,7 @@
 use half::bf16;
 
-use apxinf_core::Error;
+use apxinf_core::storage::GpuStorageHandle;
+use apxinf_core::{DType, Device, Error, Shape, Storage, Tensor};
 
 use crate::kernels::qwen35_w4::{project_bf16, Qwen35W4Buffers, Qwen35W4Layout};
 use crate::test_util::{assert_bf16_close_reduction, download_bf16_as_fp32, upload_fp32_as_bf16};
@@ -136,6 +137,103 @@ fn qwen35_w4_cuda_projection_rejects_non_finite_output() {
     )
     .unwrap_err();
     assert!(matches!(error, Error::Other(message) if message.contains("non-finite W4 output")));
+}
+
+#[test]
+fn qwen35_w4_cuda_projection_rejects_bf16_conversion_overflow() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let layout = Qwen35W4Layout::new(1, 2, 32).unwrap();
+    let activation = upload_fp32_as_bf16(&ctx, &[3.3895e38, 7.0e35], vec![1, 2]).unwrap();
+    let scales = upload_fp32_as_bf16(&ctx, &[1.0], vec![1, 1]).unwrap();
+    let weights = upload_u32(&ctx, &[0x0000_0011]);
+    let zero_points = upload_u32(&ctx, &[0]);
+
+    let error = project_bf16(
+        &ctx,
+        &activation,
+        Qwen35W4Buffers {
+            weight_packed: &weights,
+            scales: &scales,
+            zero_points: &zero_points,
+        },
+        layout,
+    )
+    .unwrap_err();
+    assert!(matches!(error, Error::Other(message) if message.contains("non-finite W4 output")));
+}
+
+#[test]
+fn qwen35_w4_cuda_projection_rejects_short_activation_storage() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let layout = Qwen35W4Layout::new(1, 2, 32).unwrap();
+    let short = CudaBuffer::alloc(2, ctx.device_id()).unwrap();
+    let handle = GpuStorageHandle {
+        ptr: short.ptr() as usize,
+        len: short.len(),
+        _prevent_leak: Some(std::sync::Arc::new(short)),
+    };
+    let device = Device::Cuda(ctx.device_id());
+    let activation = Tensor::from_raw_parts(
+        Shape::new(vec![1, 2]),
+        DType::BF16,
+        device,
+        Storage::Gpu { device, handle },
+    );
+    let scales = upload_fp32_as_bf16(&ctx, &[1.0], vec![1, 1]).unwrap();
+    let weights = upload_u32(&ctx, &[0]);
+    let zero_points = upload_u32(&ctx, &[0]);
+
+    let error = project_bf16(
+        &ctx,
+        &activation,
+        Qwen35W4Buffers {
+            weight_packed: &weights,
+            scales: &scales,
+            zero_points: &zero_points,
+        },
+        layout,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::Other(message) if message.contains("activation") && message.contains("bytes"))
+    );
+}
+
+#[test]
+fn qwen35_w4_cuda_projection_rejects_short_scale_storage() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let layout = Qwen35W4Layout::new(2, 1, 32).unwrap();
+    let activation = upload_fp32_as_bf16(&ctx, &[1.0], vec![1, 1]).unwrap();
+    let short = CudaBuffer::alloc(2, ctx.device_id()).unwrap();
+    let handle = GpuStorageHandle {
+        ptr: short.ptr() as usize,
+        len: short.len(),
+        _prevent_leak: Some(std::sync::Arc::new(short)),
+    };
+    let device = Device::Cuda(ctx.device_id());
+    let scales = Tensor::from_raw_parts(
+        Shape::new(vec![2, 1]),
+        DType::BF16,
+        device,
+        Storage::Gpu { device, handle },
+    );
+    let weights = upload_u32(&ctx, &[0, 0]);
+    let zero_points = upload_u32(&ctx, &[0]);
+
+    let error = project_bf16(
+        &ctx,
+        &activation,
+        Qwen35W4Buffers {
+            weight_packed: &weights,
+            scales: &scales,
+            zero_points: &zero_points,
+        },
+        layout,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, Error::Other(message) if message.contains("scale") && message.contains("bytes"))
+    );
 }
 
 #[test]

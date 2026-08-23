@@ -32,7 +32,9 @@ extern "C" cudaError_t apxinf_static_qwen35_w4_project_bf16(
       rows <= 0 || out_features <= 0 || in_features <= 0 || group_size != 32) {
     return cudaErrorInvalidValue;
   }
-  qwen35_w4_project_bf16_kernel<<<rows * out_features, 256, 0, stream>>>(
+  const int64_t blocks = static_cast<int64_t>(rows) * out_features;
+  if (blocks > INT32_MAX) return cudaErrorInvalidConfiguration;
+  qwen35_w4_project_bf16_kernel<<<static_cast<int>(blocks), 256, 0, stream>>>(
       static_cast<const __nv_bfloat16*>(activation),
       static_cast<const uint32_t*>(weight_packed),
       static_cast<const __nv_bfloat16*>(scales),

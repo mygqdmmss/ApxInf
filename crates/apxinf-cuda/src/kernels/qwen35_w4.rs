@@ -2,7 +2,7 @@
 
 use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 
-use super::contracts::{gpu_ptr, output_tensor};
+use super::contracts::output_tensor;
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
 use crate::ffi;
@@ -116,6 +116,21 @@ pub fn project_bf16(
             got: buffers.scales.device(),
         });
     }
+    let rows = dims[0];
+    let activation_bytes = checked_product(
+        &[rows, layout.in_features, DType::BF16.size_in_bytes()],
+        "activation",
+    )?;
+    let activation_buffer = require_tensor_buffer(ctx, "activation", activation, activation_bytes)?;
+    let scale_bytes = checked_product(
+        &[
+            layout.out_features,
+            layout.groups(),
+            DType::BF16.size_in_bytes(),
+        ],
+        "scale",
+    )?;
+    let scale_buffer = require_tensor_buffer(ctx, "scale", buffers.scales, scale_bytes)?;
     require_exact_buffer(
         ctx,
         "packed weight",
@@ -129,7 +144,6 @@ pub fn project_bf16(
         layout.zero_point_bytes()?,
     )?;
 
-    let rows = dims[0];
     let output_bytes = checked_product(
         &[rows, layout.out_features, DType::BF16.size_in_bytes()],
         "output",
@@ -148,9 +162,9 @@ pub fn project_bf16(
 
     unsafe {
         ffi::check_cuda(ffi::apxinf_static_qwen35_w4_project_bf16(
-            gpu_ptr(activation)?,
+            activation_buffer.ptr(),
             buffers.weight_packed.ptr(),
-            gpu_ptr(buffers.scales)?,
+            scale_buffer.ptr(),
             buffers.zero_points.ptr(),
             output.ptr(),
             flags.ptr(),
@@ -185,6 +199,24 @@ pub fn project_bf16(
         DType::BF16,
         output,
     ))
+}
+
+fn require_tensor_buffer(
+    ctx: &CudaContext,
+    name: &str,
+    tensor: &Tensor,
+    required_bytes: usize,
+) -> Result<CudaBuffer> {
+    let buffer = CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?;
+    if buffer.device() != ctx.device_id() || buffer.len() < required_bytes {
+        return Err(Error::Other(format!(
+            "Qwen3.5 W4 {name} requires {required_bytes} bytes on CUDA{}, got {} bytes on CUDA{}",
+            ctx.device_id(),
+            buffer.len(),
+            buffer.device()
+        )));
+    }
+    Ok(buffer)
 }
 
 fn require_exact_buffer(
