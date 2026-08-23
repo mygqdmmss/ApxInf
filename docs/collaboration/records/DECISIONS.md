@@ -17,6 +17,8 @@
 | D-013 | 2026-08-23 | M2-O0 改为“成员2本地编写 oracle generator/schema，成员1在服务器 GPU1 logical lane 一次执行真实 checkpoint”；golden/manifest 落受控共享 artifact 路径，远程成员只接收批准导出的最小 bundle 或 manifest/schema/hash | Qwen3.5 没有现成 transformers runtime；完整权重/BF16 展开和长序列逐层 oracle 不应成为成员2个人电脑的前置条件；远程电脑不默认挂载服务器 JuiceFS | 成员1 + 成员2 | accepted |
 | D-014 | 2026-08-23 | W4 loader 必须用 synthetic fixture 验证 K-packed weight、K-group scale 与 N-packed zero-point；token admission 以 checkpoint `text_config.vocab_size` 为边界 | 真实 tensor slice 禁止入库；zero-point 与 weight 的 pack 轴不同；本模型 model vocab 实测 248320，而 tokenizer vocab 实测 248044，image token 248056 仍合法 | 成员1 + 成员2 | accepted |
 | D-015 | 2026-08-23 | 四个 GPU 只作为逻辑 lane；服务器所有真实 GPU/模型任务通过全局锁串行队列，优先级为 oracle → GPU0 base → GPU2 kernel → GPU3 bonus | 单账号/单工作树拓扑与最终方案原“四卡并行常驻”表述冲突；本地代码可并行，服务器证据不可并行占用 | 成员1 | accepted |
+| D-016 | 2026-08-24 | ProtocolRuntime adapter 分层放在顶层 server crate；model crate 只暴露 checkpoint/session 所需的中立接口，避免 apxinf-model 反向依赖 HTTP/server trait | `TokenStream`/`ProtocolRuntime` 定义在 `src/server/service.rs`；保持模型库可复用并确保生产 adapter 真正增量 | 成员1 | accepted |
+| D-017 | 2026-08-24 | strict `serve` 在真实 checkpoint-backed CUDA executor 接入前必须拒绝启动，不得把 synthetic callback、旧 CPU CLI 或 protocol stub 暴露为生产 runtime | 当前只有 synthetic executor control plane 和 transport；无真实 CUDA forward 证据时 fail-closed 比伪造 RUNTIME_READY 安全 | 成员1 | accepted |
 
 ## 新决策模板
 
