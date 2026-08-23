@@ -14,8 +14,8 @@
 | M2-P0 | 成员2 | protocol stub、schema、/health、七项负控和恢复 gate | integrated | `d26738f` | Rust protocol 33/33、Python oracle/protocol 21/21；成员1后续只接稳定 adapter，不重写协议语义 |
 | M2-O0 | 成员2 + 成员1 | oracle generator、checkpoint manifest、选择性 layer golden、hidden 代理集 | done | `46182a1167570e7595b3e658b02fb8acadac9f7a` | GPU1 queue `P0-oracle-20260823T095000Z` 成功；峰值 20942 MiB；artifact `/mnt/chuangxin/team2/artifacts/apxinf/oracle/63768c10df38c0395e12ef49edac1bd539eaeeea/46182a1167570e7595b3e658b02fb8acadac9f7a/` |
 | M2-L0 | 成员2 | synthetic W4 pack/unpack fixture 与 loader 方向性测试 | integrated | `d26738f` | loader 26/26；K-packed weight、group-32 scale、N-packed zero-point manifest validation 已集成 |
-| M1-R1 | 成员1 | runtime adapter、bounded GPU worker、device-budget admission | active | `58d9fec` | protocol adapter 已稳定；oracle 已完成并释放 GPU1，下一步排 GPU0 correctness/reliability base job |
-| M1-C0 | 成员1 | Qwen35 loader/model/state/GDN/full-attention vertical slice | planned | - | 逐算子/逐层对拍后再接服务 |
+| M1-R1 | 成员1 | runtime adapter、bounded GPU worker、device-budget admission | active | `ad9d0e8` | 已完成严格 config parser、checkpoint header-only inventory、W4 packed CPU reference；真实 GPU executor/runtime adapter 仍待实现 |
+| M1-C0 | 成员1 | Qwen35 loader/model/state/GDN/full-attention vertical slice | active | `1b3d699` | config parser `cb19aaa`、inventory loader `1b3d699`、W4 reference `ad9d0e8`；尚未达到 REFERENCE_LAYER |
 | M3-E0 | 成员3 | W4/GEMV/Graph baseline 与 paired benchmark harness | planned | - | 本地静态准备，服务器由成员1在 GPU2 replay |
 | M3-B0 | 成员3 | 显存账本、context/C4/C8/MTP/vision bonus evidence | planned | - | 文本 BASE_GOOD 后逐项开启 |
 | REL-001 | 成员1+2 | protocol/reliability eligibility campaign | planned | - | 七项 gate、五项 boolean、失败后恢复 |

@@ -24,7 +24,7 @@
 
 - [ ] Add failing tests for nested `text_config`, 64 layer types, 48/16 split, hidden/intermediate sizes, partial RoPE, output gate, GDN dimensions, vocab, image token and EOS config.
 - [ ] Run the focused test and confirm RED because the parser is currently frozen constants only.
-- [ ] Implement `Qwen35ModelConfig::from_json_str/from_json_file` with required-field and type checks; reject unknown architecture/model type and mismatched layer count instead of applying defaults.
+- [x] Implement `Qwen35ModelConfig::from_json_str/from_json_file` with required-field and type checks; reject unknown architecture/model type and mismatched layer count instead of applying defaults. (`cb19aaa`)
 - [ ] Re-run focused tests and `cargo test -p apxinf-model qwen35::config`.
 - [ ] Commit `feat(qwen35): parse checkpoint model config`.
 
@@ -33,7 +33,7 @@
 **Files:** Create `crates/apxinf-model/src/qwen35/loader.rs`; modify `qwen35/mod.rs`, `crates/apxinf-model/src/lib.rs`.
 
 - [ ] Add failing fixture tests using `fixtures/qwen35-metadata/config.json` and `model.safetensors.index.json` for revision/config identity, sorted tensor inventory SHA256, mixed W4/BF16 classification, and fail-closed missing/unknown layouts.
-- [ ] Implement a `Qwen35Checkpoint` containing parsed config, immutable `LoaderManifest`, shard paths and inventory digest. Call `apxinf_loader::safetensors::read_sharded_tensor_manifest` and `validate_qwen35_w4_inventory`; never copy payloads or upcast the whole model.
+- [x] Implement a `Qwen35CheckpointInventory` containing parsed config, immutable `LoaderManifest`, source metadata and inventory digest. Call `apxinf_loader::safetensors::read_sharded_tensor_manifest`; never copy payloads or upcast the whole model. (`1b3d699`)
 - [ ] Add a real-model smoke command/test that reads headers only and reports inventory bytes/digest without allocating tensor payloads.
 - [ ] Re-run focused loader tests and `cargo check --workspace --locked`.
 - [ ] Commit `feat(qwen35): add fail-closed checkpoint inventory loader`.
@@ -43,7 +43,7 @@
 **Files:** Modify `crates/apxinf-model/src/qwen35/weights.rs`; add tests and, if needed, a focused `w4.rs` module.
 
 - [ ] Add failing tests for K nibble order, N zero-point order, group-32 boundaries, tails, signed/unsigned zero points, and k/down projection shapes.
-- [ ] Implement checked `PackedW4Linear` metadata and a small CPU reference matmul over packed words. Reject unknown nibble/layout metadata and non-finite scales.
+- [x] Implement checked packed W4 metadata and a small CPU reference matmul over packed words, including group/tail and N-packed zero-point checks. (`ad9d0e8`)
 - [ ] Compare the result with the existing loader synthetic fixture and assert exact F32 reference values on tiny matrices.
 - [ ] Commit `feat(qwen35): add packed W4 reference projection`.
 
