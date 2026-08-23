@@ -1,6 +1,6 @@
 //! Rotary-position and QKV layout operator contracts.
 
-use apxinf_core::{DType, Error, Result, Shape, Tensor};
+use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 
 pub use super::attention::QkvTensors;
 use super::contracts::{
@@ -341,6 +341,63 @@ pub fn apply_batched(
         input.shape().clone(),
         input.dtype(),
         device_id,
+        out_buf,
+    ))
+}
+
+/// Apply Qwen3.5's half-split partial RoPE to BF16 `[seq, heads, head_dim]`.
+/// Only the first `rotary_dim` channels are rotated; the tail is copied on
+/// device unchanged. `rotary_dim` controls the frequency denominator.
+pub fn apply_partial_batched(
+    ctx: &CudaContext,
+    input: &Tensor,
+    n_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    rope_theta: f32,
+    pos_offset: u32,
+) -> Result<Tensor> {
+    let dims = input.shape().dims();
+    if input.device() != Device::Cuda(ctx.device_id())
+        || input.dtype() != DType::BF16
+        || dims.len() != 3
+        || dims[1] != n_heads
+        || dims[2] != head_dim
+        || n_heads == 0
+        || rotary_dim == 0
+        || rotary_dim > head_dim
+        || rotary_dim % 2 != 0
+        || !rope_theta.is_finite()
+        || rope_theta <= 0.0
+    {
+        return Err(Error::Other(format!(
+            "partial RoPE expects CUDA BF16 [seq,{n_heads},{head_dim}] with even rotary_dim <= head_dim, got {:?} {} on {:?}",
+            dims,
+            input.dtype(),
+            input.device()
+        )));
+    }
+    let seq_len = dims[0];
+    let out_buf = crate::buffer::CudaBuffer::alloc_zeros(input.size_in_bytes(), ctx.device_id())
+        .map_err(Error::Cuda)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_rope_partial_batched_bf16(
+            gpu_ptr(input)?,
+            out_buf.ptr(),
+            head_dim as u32,
+            rotary_dim as u32,
+            n_heads as u32,
+            seq_len as u32,
+            rope_theta,
+            pos_offset,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(make_gpu_tensor(
+        input.shape().clone(),
+        DType::BF16,
+        ctx.device_id(),
         out_buf,
     ))
 }

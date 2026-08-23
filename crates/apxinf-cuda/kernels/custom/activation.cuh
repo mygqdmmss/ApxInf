@@ -33,6 +33,17 @@ __global__ void silu_bf16_kernel(
     output[gid] = __float2bfloat16(y);
 }
 
+// ── Sigmoid (bf16) ───────────────────────────────────────────────────────
+
+__global__ void sigmoid_bf16_kernel(
+    const __nv_bfloat16* input, __nv_bfloat16* output, uint32_t count)
+{
+    uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (gid >= count) return;
+    float x = __bfloat162float(input[gid]);
+    output[gid] = __float2bfloat16(1.0f / (1.0f + expf(-x)));
+}
+
 
 
 // ── Fused SiLU + Mul (bf16) — reads gate and up from a single packed ────

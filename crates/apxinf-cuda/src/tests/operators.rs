@@ -1,4 +1,4 @@
-use apxinf_core::{DType, Error, Result, Shape, Tensor};
+use apxinf_core::{Backend, DType, Error, KvCache, Result, Shape, Tensor};
 
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
@@ -398,6 +398,24 @@ fn kv_cache_append_bf16_writes_correct_slot() {
             }
         }
     }
+}
+
+#[test]
+fn dynamic_kv_cache_accepts_bf16_attention_after_append() {
+    let backend = crate::CudaBackend::new(0).unwrap();
+    let ctx = backend.context();
+    let mut cache = crate::CudaKVCache::new(0, 1, 1, 4, 2).unwrap();
+    let key = upload_fp32_as_bf16(ctx, &[1.0, 0.0, 0.0, 0.0], vec![1, 1, 4]).unwrap();
+    let value = upload_fp32_as_bf16(ctx, &[2.0, 3.0, 4.0, 5.0], vec![1, 1, 4]).unwrap();
+    cache.append(ctx, 0, &key, &value, 1).unwrap();
+    cache.advance(1);
+
+    let query = upload_fp32_as_bf16(ctx, &[1.0, 0.0, 0.0, 0.0], vec![1, 1, 4]).unwrap();
+    let output = backend
+        .sdpa_decode(&query, &mut cache, 0, 1, 1, 4, 1, 2)
+        .unwrap();
+    assert_eq!(output.shape().dims(), &[1, 4]);
+    assert_eq!(output.dtype(), DType::BF16);
 }
 
 // ── Decode-pos kernel variants (rope_decode, attn_softmax_decode, kv_cache_append_decode) ──

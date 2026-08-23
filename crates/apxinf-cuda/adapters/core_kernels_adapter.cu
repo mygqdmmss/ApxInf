@@ -205,6 +205,16 @@ extern "C" cudaError_t apxinf_silu_bf16(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_sigmoid_bf16(
+    const void* input, void* output, uint32_t count, void* stream)
+{
+    dim3 grid((count + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
+    dim3 block(BLOCK_SIZE, 1, 1);
+    sigmoid_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)input, (__nv_bfloat16*)output, count);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_silu_mul_bf16(
     const void* gate_up, void* output, uint32_t inter, void* stream)
 {
@@ -322,6 +332,29 @@ extern "C" cudaError_t apxinf_rope_batched_bf16(
     rope_batched_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
         (const __nv_bfloat16*)input, (__nv_bfloat16*)output,
         head_dim, n_heads, seq_len, rope_theta, pos_offset);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_rope_partial_batched_bf16(
+    const void* input, void* output,
+    uint32_t head_dim, uint32_t rotary_dim, uint32_t n_heads,
+    uint32_t seq_len, float rope_theta, uint32_t pos_offset, void* stream)
+{
+    if (input == nullptr || output == nullptr || head_dim == 0 ||
+        rotary_dim == 0 || rotary_dim > head_dim || rotary_dim % 2 != 0 ||
+        n_heads == 0 || seq_len == 0 || !(rope_theta > 0.0f)) {
+        return cudaErrorInvalidValue;
+    }
+    cudaError_t copy_status = cudaMemcpyAsync(
+        output, input,
+        static_cast<size_t>(seq_len) * n_heads * head_dim * sizeof(__nv_bfloat16),
+        cudaMemcpyDeviceToDevice, (cudaStream_t)stream);
+    if (copy_status != cudaSuccess) return copy_status;
+    dim3 grid((rotary_dim / 2 + BLOCK_SIZE - 1) / BLOCK_SIZE, n_heads, seq_len);
+    dim3 block(BLOCK_SIZE, 1, 1);
+    rope_partial_batched_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)input, (__nv_bfloat16*)output,
+        head_dim, rotary_dim, n_heads, seq_len, rope_theta, pos_offset);
     return cudaGetLastError();
 }
 

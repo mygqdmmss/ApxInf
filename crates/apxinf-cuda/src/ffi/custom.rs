@@ -511,6 +511,13 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
+    pub fn apxinf_sigmoid_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        count: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
     pub fn apxinf_silu_mul_bf16(
         gate_up: *const c_void,
         output: *mut c_void,
@@ -721,6 +728,18 @@ extern "C" {
         input: *const c_void,
         output: *mut c_void,
         head_dim: u32,
+        n_heads: u32,
+        seq_len: u32,
+        rope_theta: f32,
+        pos_offset: u32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_rope_partial_batched_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        head_dim: u32,
+        rotary_dim: u32,
         n_heads: u32,
         seq_len: u32,
         rope_theta: f32,

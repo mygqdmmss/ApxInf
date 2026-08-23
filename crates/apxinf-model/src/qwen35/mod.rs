@@ -11,6 +11,7 @@ pub mod weights;
 #[cfg(feature = "cuda")]
 pub use cuda::{
     Qwen35AttentionProjectionTensors, Qwen35CheckpointProjection, Qwen35CudaFullAttentionLayer,
+    Qwen35CudaFullAttentionState,
 };
 
 pub use admission::{

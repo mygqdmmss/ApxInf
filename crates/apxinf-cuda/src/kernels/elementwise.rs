@@ -262,6 +262,50 @@ pub fn concat_rows_bf16(ctx: &CudaContext, first: &Tensor, second: &Tensor) -> R
     Ok(matrix_tensor(ctx, first_rows + second_rows, cols, output))
 }
 
+/// Copy a contiguous column range from a CUDA BF16 matrix without touching
+/// host memory. This is used to separate Qwen3.5's fused q/gate projection.
+pub fn slice_columns_bf16(
+    ctx: &CudaContext,
+    input: &Tensor,
+    start: usize,
+    width: usize,
+) -> Result<Tensor> {
+    let (rows, cols) = matrix_shape(input, "column slice")?;
+    if input.dtype() != DType::BF16
+        || input.device() != apxinf_core::Device::Cuda(ctx.device_id())
+        || width == 0
+        || start.checked_add(width).is_none()
+        || start + width > cols
+    {
+        return Err(Error::Other(format!(
+            "BF16 column slice expects CUDA matrix and range within [0,{cols}), got start={start} width={width}"
+        )));
+    }
+    let source = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
+    let source_offset = start * DType::BF16.size_in_bytes();
+    let source_view = source
+        .view(source_offset, source.len() - source_offset)
+        .map_err(Error::Cuda)?;
+    let output = bf16_output(ctx, rows, width)?;
+    let width_bytes = width * DType::BF16.size_in_bytes();
+    let source_pitch = cols * DType::BF16.size_in_bytes();
+    let destination_pitch = width_bytes;
+    unsafe {
+        ffi::check_cuda(ffi::cudaMemcpy2DAsync(
+            output.ptr(),
+            destination_pitch,
+            source_view.ptr(),
+            source_pitch,
+            width_bytes,
+            rows,
+            ffi::cudaMemcpyKind::cudaMemcpyDeviceToDevice,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    Ok(matrix_tensor(ctx, rows, width, output))
+}
+
 pub fn euler_update_bf16(
     ctx: &CudaContext,
     state: &Tensor,

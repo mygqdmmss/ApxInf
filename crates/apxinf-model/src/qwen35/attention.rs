@@ -1,6 +1,8 @@
 use super::PackedLinearLayout;
 use thiserror::Error;
 
+pub(crate) const QWEN35_ROPE_THETA: f32 = 10_000_000.0;
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum AttentionError {
     #[error("{name} dimensions are inconsistent")]

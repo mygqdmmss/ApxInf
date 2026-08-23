@@ -1,5 +1,5 @@
 use apxinf_core::Backend;
-use apxinf_core::{DType, Device, Shape, Tensor};
+use apxinf_core::{DType, Device, KvCache, Shape, Tensor};
 use apxinf_cuda::kernels::qwen35_w4::{Qwen35W4DeviceProjection, Qwen35W4Layout};
 use apxinf_cuda::CudaContext;
 use half::bf16;
@@ -31,6 +31,56 @@ pub struct Qwen35CudaFullAttentionLayer {
     q_norm: Tensor,
     k_norm: Tensor,
     post_attention_norm: Tensor,
+    n_query_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    rope_theta: f32,
+    rms_epsilon: f32,
+}
+
+/// Request-local state for one CUDA full-attention layer.
+///
+/// The cache is deliberately one-layer and BF16-only. The complete model
+/// executor will own one such cache per full-attention layer; this standalone
+/// state keeps the layer smoke and its position semantics independently
+/// testable without introducing a CPU mirror.
+pub struct Qwen35CudaFullAttentionState {
+    cache: apxinf_cuda::CudaKVCache,
+    max_seq_len: usize,
+    device_id: usize,
+}
+
+impl Qwen35CudaFullAttentionState {
+    pub fn new(backend: &apxinf_cuda::CudaBackend, max_seq_len: usize) -> Result<Self, String> {
+        if max_seq_len == 0 {
+            return Err("full-attention max sequence length must be non-zero".into());
+        }
+        let device_id = backend.device_id();
+        let cache = apxinf_cuda::CudaKVCache::new_bf16(device_id, 1, 4, 256, max_seq_len)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            cache,
+            max_seq_len,
+            device_id,
+        })
+    }
+
+    pub fn seq_len(&self) -> usize {
+        self.cache.seq_len()
+    }
+
+    pub const fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+
+    pub const fn device_id(&self) -> usize {
+        self.device_id
+    }
+
+    pub fn clear(&mut self) -> Result<(), String> {
+        apxinf_core::KvCache::clear(&mut self.cache).map_err(|error| error.to_string())
+    }
 }
 
 pub struct Qwen35AttentionProjectionTensors {
@@ -93,6 +143,12 @@ impl Qwen35CudaFullAttentionLayer {
                 "post_attention_layernorm.weight",
                 inventory.config.hidden_size,
             )?,
+            n_query_heads: inventory.config.full_attention_heads,
+            n_kv_heads: inventory.config.full_attention_kv_heads,
+            head_dim: inventory.config.full_attention_head_dim,
+            rotary_dim: inventory.config.partial_rotary_dim(),
+            rope_theta: super::attention::QWEN35_ROPE_THETA,
+            rms_epsilon: inventory.config.rms_norm_eps,
         })
     }
 
@@ -154,7 +210,7 @@ impl Qwen35CudaFullAttentionLayer {
             ));
         }
         let normalized = backend
-            .rms_norm(hidden, &self.input_norm, 1e-6)
+            .rms_norm(hidden, &self.input_norm, self.rms_epsilon)
             .map_err(|error| error.to_string())?;
         Ok(Qwen35AttentionProjectionTensors {
             q_gate: self
@@ -170,6 +226,181 @@ impl Qwen35CudaFullAttentionLayer {
                 .project(backend.context(), &normalized)
                 .map_err(|error| error.to_string())?,
         })
+    }
+
+    /// Execute one causal CUDA BF16 token step, including the complete
+    /// full-attention and SwiGLU layer order from the reference semantics.
+    pub fn decode_token(
+        &self,
+        backend: &apxinf_cuda::CudaBackend,
+        hidden: &Tensor,
+        position: usize,
+        state: &mut Qwen35CudaFullAttentionState,
+    ) -> Result<Tensor, String> {
+        let expected_device = Device::Cuda(self.device_id);
+        if backend.device() != expected_device
+            || state.device_id != self.device_id
+            || hidden.device() != expected_device
+            || hidden.dtype() != DType::BF16
+            || hidden.shape().dims() != [1, self.input_norm.shape().dims()[0]]
+        {
+            return Err(format!(
+                "full-attention decode requires CUDA{} BF16 [1,{}] hidden, matching state/backend; got {:?} {} on {:?}",
+                self.device_id,
+                self.input_norm.shape().dims()[0],
+                hidden.shape().dims(),
+                hidden.dtype(),
+                hidden.device()
+            ));
+        }
+        if position != state.seq_len() {
+            return Err(format!(
+                "full-attention position {position} does not match local KV length {}",
+                state.seq_len()
+            ));
+        }
+        if position >= state.max_seq_len {
+            return Err(format!(
+                "full-attention position {position} exceeds max sequence length {}",
+                state.max_seq_len
+            ));
+        }
+        if position > u32::MAX as usize {
+            return Err("full-attention position exceeds CUDA RoPE range".into());
+        }
+        if self.n_query_heads != 24
+            || self.n_kv_heads != 4
+            || self.head_dim != 256
+            || self.rotary_dim != 64
+            || self.q_layout().out_features != 2 * self.n_query_heads * self.head_dim
+            || self.k_layout().out_features != self.n_kv_heads * self.head_dim
+            || self.v_layout().out_features != self.n_kv_heads * self.head_dim
+            || self.o_layout().out_features != self.input_norm.shape().dims()[0]
+            || self.gate_layout().out_features != self.up_layout().out_features
+            || self.down_layout().out_features != self.input_norm.shape().dims()[0]
+        {
+            return Err(
+                "checkpoint full-attention dimensions violate the CUDA layer contract".into(),
+            );
+        }
+
+        let ctx = backend.context();
+        let normalized = backend
+            .rms_norm(hidden, &self.input_norm, self.rms_epsilon)
+            .map_err(|error| error.to_string())?;
+        let q_gate = self
+            .q_proj
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+        let k = self
+            .k_proj
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+        let v = self
+            .v_proj
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+
+        let q_width = self.n_query_heads * self.head_dim;
+        let q = apxinf_cuda::kernels::elementwise::slice_columns_bf16(ctx, &q_gate, 0, q_width)
+            .map_err(|error| error.to_string())?
+            .reshape(vec![1, self.n_query_heads, self.head_dim])
+            .map_err(|error| error.to_string())?;
+        let gate =
+            apxinf_cuda::kernels::elementwise::slice_columns_bf16(ctx, &q_gate, q_width, q_width)
+                .map_err(|error| error.to_string())?;
+        let k = k
+            .reshape(vec![1, self.n_kv_heads, self.head_dim])
+            .map_err(|error| error.to_string())?;
+        let v = v
+            .reshape(vec![1, self.n_kv_heads, self.head_dim])
+            .map_err(|error| error.to_string())?;
+
+        let q = q
+            .reshape(vec![self.n_query_heads, self.head_dim])
+            .and_then(|value| backend.rms_norm(&value, &self.q_norm, self.rms_epsilon))
+            .map_err(|error| error.to_string())?
+            .reshape(vec![1, self.n_query_heads, self.head_dim])
+            .map_err(|error| error.to_string())?;
+        let k = k
+            .reshape(vec![self.n_kv_heads, self.head_dim])
+            .and_then(|value| backend.rms_norm(&value, &self.k_norm, self.rms_epsilon))
+            .map_err(|error| error.to_string())?
+            .reshape(vec![1, self.n_kv_heads, self.head_dim])
+            .map_err(|error| error.to_string())?;
+        let q = apxinf_cuda::kernels::rope::apply_partial_batched(
+            ctx,
+            &q,
+            self.n_query_heads,
+            self.head_dim,
+            self.rotary_dim,
+            self.rope_theta,
+            position as u32,
+        )
+        .map_err(|error| error.to_string())?;
+        let k = apxinf_cuda::kernels::rope::apply_partial_batched(
+            ctx,
+            &k,
+            self.n_kv_heads,
+            self.head_dim,
+            self.rotary_dim,
+            self.rope_theta,
+            position as u32,
+        )
+        .map_err(|error| error.to_string())?;
+
+        state
+            .cache
+            .append(ctx, 0, &k, &v, 1)
+            .map_err(|error| error.to_string())?;
+        let attended = backend
+            .sdpa_decode(
+                &q,
+                &mut state.cache,
+                0,
+                self.n_query_heads,
+                self.n_kv_heads,
+                self.head_dim,
+                position + 1,
+                state.max_seq_len,
+            )
+            .map_err(|error| error.to_string())?;
+        let gate = apxinf_cuda::kernels::activation::sigmoid(ctx, &gate)
+            .map_err(|error| error.to_string())?;
+        let gated = backend
+            .mul(&attended, &gate)
+            .map_err(|error| error.to_string())?;
+        let attention_update = self
+            .o_proj
+            .project(ctx, &gated)
+            .map_err(|error| error.to_string())?;
+        let residual = backend
+            .add(hidden, &attention_update)
+            .map_err(|error| error.to_string())?;
+        let mlp_input = backend
+            .rms_norm(&residual, &self.post_attention_norm, self.rms_epsilon)
+            .map_err(|error| error.to_string())?;
+        let mlp_gate = self
+            .gate_proj
+            .project(ctx, &mlp_input)
+            .map_err(|error| error.to_string())?;
+        let mlp_up = self
+            .up_proj
+            .project(ctx, &mlp_input)
+            .map_err(|error| error.to_string())?;
+        let mlp_gate = backend.silu(&mlp_gate).map_err(|error| error.to_string())?;
+        let mlp_hidden = backend
+            .mul(&mlp_gate, &mlp_up)
+            .map_err(|error| error.to_string())?;
+        let mlp_update = self
+            .down_proj
+            .project(ctx, &mlp_hidden)
+            .map_err(|error| error.to_string())?;
+        let output = backend
+            .add(&residual, &mlp_update)
+            .map_err(|error| error.to_string())?;
+        state.cache.advance(1);
+        Ok(output)
     }
 }
 
@@ -291,6 +522,7 @@ mod tests {
         assert_eq!(layer.up_layout().out_features, 17408);
         assert_eq!(layer.down_layout().out_features, 5120);
         assert_eq!(layer.norm_shapes(), [[5120], [256], [256], [5120]]);
+        assert_eq!(layer.rope_theta, 10_000_000.0);
     }
 
     #[test]
@@ -333,6 +565,53 @@ mod tests {
         assert_eq!(projected.v.shape().dims(), &[8, 1024]);
         assert_eq!(projected.q_gate.device(), Device::Cuda(device));
         assert!(apxinf_cuda::transfers::to_cpu(&projected.q_gate).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires GPU2 and the pinned Qwen3.5 checkpoint payload"]
+    fn real_full_attention_layer_three_runs_one_cuda_token_step_and_advances_local_kv() {
+        let checkpoint = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
+            .map(std::path::PathBuf::from)
+            .expect("APXINF_QWEN35_CHECKPOINT must point to the pinned checkpoint");
+        let device = std::env::var("APXINF_CUDA_DEVICE")
+            .expect("APXINF_CUDA_DEVICE must select a non-formal development GPU")
+            .parse::<usize>()
+            .unwrap();
+        let ctx = CudaContext::new(device).expect("CUDA device required");
+        let backend = apxinf_cuda::CudaBackend::new(device).expect("CUDA backend required");
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&checkpoint, QWEN35_MODEL_REVISION)
+                .unwrap();
+        let layer = Qwen35CudaFullAttentionLayer::from_inventory(&ctx, &inventory, 3).unwrap();
+
+        let oracle = std::path::PathBuf::from(
+            "/mnt/chuangxin/team2/artifacts/apxinf/oracle/63768c10df38c0395e12ef49edac1bd539eaeeea/46182a1167570e7595b3e658b02fb8acadac9f7a/artifacts/embedding.f32.bin",
+        );
+        let bytes = std::fs::read(oracle).unwrap();
+        let values = bytes
+            .chunks_exact(4)
+            .take(5120)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+            .map(half::bf16::from_f32)
+            .collect::<Vec<_>>();
+        let host = Tensor::from_bf16(Shape::new(vec![1, 5120]), &values).unwrap();
+        let hidden = apxinf_cuda::transfers::to_cuda(&host, device).unwrap();
+        let mut state = Qwen35CudaFullAttentionState::new(&backend, 8).unwrap();
+
+        let output = layer
+            .decode_token(&backend, &hidden, 0, &mut state)
+            .unwrap();
+
+        assert_eq!(output.shape().dims(), &[1, 5120]);
+        assert_eq!(output.dtype(), DType::BF16);
+        assert_eq!(output.device(), Device::Cuda(device));
+        let output_cpu = apxinf_cuda::transfers::to_cpu(&output).unwrap();
+        let output_values = output_cpu.to_f32_vec().unwrap();
+        assert!(output_values.iter().all(|value| value.is_finite()));
+        assert!(output_values.iter().any(|value| value.abs() > 1e-6));
+        assert_eq!(state.cache.storage_dtype(), DType::BF16);
+        assert_eq!(state.cache.dtype().unwrap(), Some(DType::BF16));
+        assert_eq!(state.seq_len(), 1);
     }
 
     #[test]

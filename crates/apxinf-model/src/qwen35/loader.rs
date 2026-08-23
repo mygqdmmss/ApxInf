@@ -8,6 +8,7 @@ use thiserror::Error;
 
 use super::attention::{
     FullAttentionReferenceConfig, FullAttentionReferenceLayer, PackedLinearReference,
+    QWEN35_ROPE_THETA,
 };
 use super::config::{Qwen35ConfigError, Qwen35ModelConfig};
 use super::weights::{PackedLinearLayout, WeightLayoutError};
@@ -521,7 +522,7 @@ impl Qwen35CheckpointInventory {
                 n_kv_heads: self.config.full_attention_kv_heads,
                 head_dim: self.config.full_attention_head_dim,
                 rotary_dim: self.config.partial_rotary_dim(),
-                rope_theta: 10_000.0,
+                rope_theta: QWEN35_ROPE_THETA,
                 rms_epsilon: self.config.rms_norm_eps,
             },
             input_norm,
@@ -869,6 +870,7 @@ mod tests {
         assert_eq!(layer.config.n_query_heads, 24);
         assert_eq!(layer.config.n_kv_heads, 4);
         assert_eq!(layer.config.rotary_dim, 64);
+        assert_eq!(layer.config.rope_theta, QWEN35_ROPE_THETA);
         assert_eq!(
             layer.q_proj.layout,
             PackedLinearLayout::new(12_288, 5_120, 32)

@@ -188,6 +188,14 @@ pub fn sdpa(
     let seq_len = query_dims[0];
     let gqa_ratio = n_heads / n_kv_heads;
     let dtype = query.dtype();
+    let cache_dtype = cache
+        .dtype()?
+        .ok_or_else(|| Error::Other("CUDA KV cache has no appended dtype".into()))?;
+    if cache_dtype != dtype {
+        return Err(Error::Other(format!(
+            "attention query dtype {dtype} does not match CUDA KV cache dtype {cache_dtype}"
+        )));
+    }
     let element_bytes = dtype.size_in_bytes();
     let scores = CudaBuffer::alloc(seq_len * n_heads * kv_len * element_bytes, ctx.device_id())
         .map_err(Error::Cuda)?;
