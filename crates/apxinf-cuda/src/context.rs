@@ -5,6 +5,35 @@ use crate::device_caps::CudaDeviceCaps;
 use crate::ffi;
 use crate::stream::CudaStream;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CudaMemoryInfo {
+    pub free_bytes: usize,
+    pub total_bytes: usize,
+}
+
+impl CudaMemoryInfo {
+    pub const fn from_bytes(free_bytes: usize, total_bytes: usize) -> Result<Self, &'static str> {
+        if free_bytes > total_bytes {
+            return Err("free CUDA memory cannot exceed total memory");
+        }
+        Ok(Self {
+            free_bytes,
+            total_bytes,
+        })
+    }
+
+    pub fn calibrated_budget_bytes(self, safety_margin_percent: u8) -> Result<usize, &'static str> {
+        if safety_margin_percent > 100 {
+            return Err("safety margin must be at most 100 percent");
+        }
+        let usable_percent = 100usize - safety_margin_percent as usize;
+        self.free_bytes
+            .checked_mul(usable_percent)
+            .and_then(|bytes| bytes.checked_div(100))
+            .ok_or("calibrated CUDA budget overflow")
+    }
+}
+
 /// CUDA libraries whose versions constrain persisted tuning results.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CudaLibraryVersions {
@@ -72,6 +101,17 @@ impl CudaContext {
         &self.library_versions
     }
 
+    pub fn memory_info(&self) -> Result<CudaMemoryInfo, String> {
+        unsafe {
+            ffi::check_cuda(ffi::cudaSetDevice(self.device_id as i32))?;
+        }
+        let (mut free_bytes, mut total_bytes) = (0usize, 0usize);
+        unsafe {
+            ffi::check_cuda(ffi::cudaMemGetInfo(&mut free_bytes, &mut total_bytes))?;
+        }
+        CudaMemoryInfo::from_bytes(free_bytes, total_bytes).map_err(str::to_owned)
+    }
+
     pub fn synchronize(&self) -> Result<(), String> {
         unsafe { ffi::check_cuda(ffi::cudaStreamSynchronize(self.stream.handle())) }
     }
@@ -110,6 +150,19 @@ fn format_version(major: i32, minor: i32, patch: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibrates_free_memory_with_eight_percent_safety_margin() {
+        let info = CudaMemoryInfo::from_bytes(1_000, 2_000).unwrap();
+        assert_eq!(info.calibrated_budget_bytes(8).unwrap(), 920);
+    }
+
+    #[test]
+    fn rejects_invalid_memory_ranges_and_margin() {
+        assert!(CudaMemoryInfo::from_bytes(2, 1).is_err());
+        let info = CudaMemoryInfo::from_bytes(1, 1).unwrap();
+        assert!(info.calibrated_budget_bytes(101).is_err());
+    }
 
     #[test]
     fn formats_cuda_runtime_versions() {
