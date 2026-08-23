@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod attention;
 pub mod config;
+pub mod gdn;
 pub mod loader;
 pub mod weights;
 
@@ -16,5 +17,6 @@ pub use attention::{
 pub use config::{
     LayerType, Qwen35Config, Qwen35ConfigError, Qwen35ModelConfig, IMAGE_TOKEN_ID, MODEL_VOCAB_SIZE,
 };
+pub use gdn::{GdnDimensions, GdnError, GdnState};
 pub use loader::{Qwen35CheckpointInventory, Qwen35LoaderError};
 pub use weights::{PackedLinearLayout, WeightLayoutError};
