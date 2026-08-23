@@ -40,11 +40,16 @@ integrates that runtime baseline.
 `src/server/` contains framework-neutral protocol types, validation, response
 serialization, SSE event construction, EOS handling, usage accounting, and a
 small runtime adapter boundary. HTTP code receives model-neutral capabilities
-and generation results; it never sees CUDA allocators or device-specific types.
+and an incremental token stream; it never sees CUDA allocators or
+device-specific types. The stream exposes `next_token()` and `cancel()`, so a
+client disconnect or EOS stop can halt generation before the full budget is
+materialized.
 
 The standalone `src/bin/apxinf_protocol_stub.rs` uses existing workspace
 dependencies and a minimal standard-library HTTP/1.1 listener, so this branch
-does not modify `Cargo.toml`, `Cargo.lock`, or `src/main.rs`. Member1 can later
+does not modify `Cargo.toml`, `Cargo.lock`, or `src/main.rs`. It accepts
+`--bind HOST:PORT` (default `127.0.0.1:8001`) and runs until SIGINT/connection
+shutdown; the test harness starts it as a child process. Member1 can later
 mount the same protocol core under the production HTTP framework and connect it
 to the existing bounded runtime worker.
 
@@ -55,10 +60,12 @@ parallel request count, fallback state, and capabilities.
 ## Admission and Error Semantics
 
 The request parser validates JSON shape and scalar types before conversion to
-runtime request types. It rejects unknown or unsupported fields, including the
-`images` probe, with HTTP 400 and a JSON `error` object. Raw malformed JSON is
-also returned as HTTP 400; JSON error formatting for this one case is useful
-but is not recorded as an evaluator hard condition.
+runtime request types. The accepted request keys are exactly `input_ids`,
+`max_new_tokens`, `temperature`, `ignore_eos`, and `stream`; unknown keys are
+rejected. It rejects unsupported fields, including the `images` probe, with
+HTTP 400 and a JSON `error` object. Raw malformed JSON is also returned as
+HTTP 400; JSON error formatting for this one case is useful but is not recorded
+as an evaluator hard condition.
 
 Pure protocol admission enforces:
 
@@ -71,25 +78,34 @@ Pure protocol admission enforces:
 - `prompt_tokens + max_new_tokens <= max_model_len` using checked arithmetic.
 
 Capacity errors from the runtime adapter remain distinct from malformed
-requests. All request-level errors map to stable JSON errors and must leave the
-stub healthy for the next request.
+requests. All request-level errors use the shape
+`{"error":{"type":"invalid_request","message":"..."}}` for protocol
+admission failures and
+`{"error":{"type":"capacity","message":"..."}}` for runtime capacity
+rejections. They must leave the stub healthy for the next request.
 
 ## Generation, SSE, EOS, and Cancellation
 
-Non-streaming success returns HTTP 200 with `type="result"`, one request ID,
-`output_ids`, and usage computed from the actual returned tokens. Streaming
-success emits consecutive token indexes under one request ID, then one done
-event containing usage, followed by `data: [DONE]`.
+Non-streaming success returns HTTP 200 with
+`{"type":"result","request_id":"...","output_ids":[...],"usage":{...}}`,
+where usage has `prompt_tokens`, `completion_tokens`, and `total_tokens`
+computed from the actual returned tokens. Streaming success emits consecutive
+token indexes under one request ID, then one done event containing the same
+usage object, followed by `data: [DONE]`. The fixture executor returns a
+deterministic token (`7`) for a one-token request and never represents this as
+model correctness evidence.
 
 The frozen EOS IDs are `248046` and `248044`. With `ignore_eos=false`, the first
 EOS token is included once in the generated token sequence and generation then
 stops. With `ignore_eos=true`, EOS does not shorten the requested budget.
 
-Every streaming request owns a cancellation handle. A socket write failure or
-client disconnect triggers cancellation and drops the request guard. Runtime
-errors are request-scoped; a subsequent health probe and short request must
-still succeed. The stub exposes deterministic fake outputs only for protocol
-testing and does not claim model correctness.
+Every request owns an incremental token stream and cancellation handle. A
+socket write failure or client disconnect triggers cancellation and drops the
+request guard. Non-streaming requests consume the same token stream into a JSON
+result, so EOS and usage behavior cannot diverge between response modes.
+Runtime errors are request-scoped; a subsequent health probe and short request
+must still succeed. The stub exposes deterministic fake outputs only for
+protocol testing and does not claim model correctness.
 
 ## Protocol Evidence
 
@@ -141,7 +157,10 @@ and K axes are swapped. No real checkpoint slice is copied into Git.
 manifest/schema generation. It accepts explicit `--model-dir`, `--output-dir`,
 `--revision`, `--layers`, and `--stages`, with optional input-manifest and
 runner arguments. Local tests use a tiny synthetic model directory and token
-manifest.
+manifest. Without `--runner`, the command writes only a job manifest and
+schema; it never invents hidden/state/logit values. With `--runner`, the
+runner receives the canonical job manifest path and must write declared output
+files; missing or extra files fail the command before hashes are recorded.
 
 The generator writes canonical JSON for:
 
@@ -157,7 +176,9 @@ golden outputs. Server execution mode delegates checkpoint-specific inference
 to an explicit runner command, validates its output against the same schema,
 and hashes every produced artifact. The artifact identity is the generator
 SHA, model revision, input-manifest SHA, layer/stage selection, and schema
-version. Unchanged identities reuse existing server artifacts.
+version. Unchanged identities reuse existing server artifacts. The generator
+records its own source SHA when invoked from a Git checkout and fails closed if
+the requested revision is empty or the model directory does not exist.
 
 Member1 executes the real job under the global lock on GPU1 and records GPU
 UUID, peak VRAM, command, raw artifact path, exported file list, and hashes
