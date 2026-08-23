@@ -237,12 +237,68 @@ impl Qwen35CheckpointInventory {
         Ok(payload)
     }
 
+    pub fn tensor_manifest(
+        &self,
+        name: &str,
+    ) -> Result<&apxinf_loader::TensorManifest, Qwen35LoaderError> {
+        self.manifest
+            .tensor(name)
+            .ok_or_else(|| Qwen35LoaderError::Inventory(format!("unknown tensor `{name}`")))
+    }
+
+    pub fn read_tensor_u32(&self, name: &str) -> Result<Vec<u32>, Qwen35LoaderError> {
+        let manifest = self.tensor_manifest(name)?;
+        if manifest.dtype != ManifestDType::I32 {
+            return Err(Qwen35LoaderError::UnsupportedDType {
+                name: name.to_owned(),
+                dtype: manifest.dtype.clone(),
+            });
+        }
+        let bytes = self.read_tensor_bytes(name)?;
+        if bytes.len() % 4 != 0 {
+            return Err(Qwen35LoaderError::Inventory(format!(
+                "I32 tensor `{name}` byte length is not divisible by 4"
+            )));
+        }
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect())
+    }
+
+    pub fn read_tensor_bf16_f32(&self, name: &str) -> Result<Vec<f32>, Qwen35LoaderError> {
+        let manifest = self.tensor_manifest(name)?;
+        if manifest.dtype != ManifestDType::BF16 {
+            return Err(Qwen35LoaderError::UnsupportedDType {
+                name: name.to_owned(),
+                dtype: manifest.dtype.clone(),
+            });
+        }
+        let bytes = self.read_tensor_bytes(name)?;
+        if bytes.len() % 2 != 0 {
+            return Err(Qwen35LoaderError::Inventory(format!(
+                "BF16 tensor `{name}` byte length is not divisible by 2"
+            )));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|chunk| {
+                half::bf16::from_bits(u16::from_le_bytes(chunk.try_into().unwrap())).to_f32()
+            })
+            .collect())
+    }
+
     fn validate_tensor_inventory(manifest: &LoaderManifest) -> Result<(), Qwen35LoaderError> {
         if manifest.tensors.is_empty() {
             return Err(Qwen35LoaderError::EmptyInventory);
         }
         for tensor in &manifest.tensors {
-            if matches!(tensor.dtype, ManifestDType::Other(_)) {
+            let allowed_shape_metadata = matches!(
+                (&tensor.dtype, tensor.name.as_str()),
+                (ManifestDType::Other(dtype), name)
+                    if dtype == "I64" && name.ends_with(".weight_shape")
+            );
+            if matches!(tensor.dtype, ManifestDType::Other(_)) && !allowed_shape_metadata {
                 return Err(Qwen35LoaderError::UnsupportedDType {
                     name: tensor.name.clone(),
                     dtype: tensor.dtype.clone(),
@@ -407,15 +463,95 @@ mod tests {
         );
     }
 
-    fn tiny_safetensors(name: &str, dtype: &str, shape: &[usize], payload: &[u8]) -> Vec<u8> {
-        let header = format!(
-            r#"{{"{name}":{{"dtype":"{dtype}","shape":{:?},"data_offsets":[0,{}]}}}}"#,
-            shape,
-            payload.len()
+    #[test]
+    fn checkpoint_inventory_rejects_unsafe_index_shard_before_payload_access() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("config.json"), config()).unwrap();
+        std::fs::write(
+            directory.path().join("model.safetensors.index.json"),
+            r#"{"weight_map":{"embed_tokens.weight":"../outside.safetensors"}}"#,
+        )
+        .unwrap();
+        let error =
+            Qwen35CheckpointInventory::from_checkpoint_dir(directory.path(), QWEN35_MODEL_REVISION)
+                .unwrap_err();
+        assert!(error.to_string().contains("unsafe shard path"));
+    }
+
+    #[test]
+    fn typed_payload_views_reject_dtype_mismatch_and_decode_little_endian_values() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("config.json"), config()).unwrap();
+        let shard_name = "model-00001-of-00001.safetensors";
+        let shard = tiny_safetensors_multi(&[
+            ("packed", "I32", &[2], &[1, 0, 0, 0, 0xef, 0xbe, 0xad, 0xde]),
+            ("scale", "BF16", &[1], &[0x00, 0x3f]),
+        ]);
+        std::fs::write(directory.path().join(shard_name), shard).unwrap();
+        std::fs::write(
+            directory.path().join("model.safetensors.index.json"),
+            format!(r#"{{"weight_map":{{"packed":"{shard_name}","scale":"{shard_name}"}}}}"#),
+        )
+        .unwrap();
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(directory.path(), QWEN35_MODEL_REVISION)
+                .unwrap();
+        assert_eq!(
+            inventory.read_tensor_u32("packed").unwrap(),
+            vec![1, 0xdead_beef]
         );
+        assert!((inventory.read_tensor_bf16_f32("scale").unwrap()[0] - 0.5).abs() < 1e-6);
+        assert!(matches!(
+            inventory.read_tensor_u32("scale"),
+            Err(Qwen35LoaderError::UnsupportedDType { .. })
+        ));
+    }
+
+    #[test]
+    fn i64_is_allowed_only_for_weight_shape_metadata() {
+        let mut manifest = LoaderManifest {
+            schema: LOADER_MANIFEST_SCHEMA.into(),
+            revision: QWEN35_MODEL_REVISION.into(),
+            vocab_size: MODEL_VOCAB_SIZE,
+            tensors: vec![TensorManifest {
+                name: "layer.weight_shape".into(),
+                shape: vec![2],
+                dtype: ManifestDType::Other("I64".into()),
+                quantization_role: None,
+                pack_axis: None,
+                group_size: None,
+            }],
+        };
+        assert!(Qwen35CheckpointInventory::from_manifest(&config(), manifest.clone()).is_ok());
+        manifest.tensors[0].name = "layer.weight".into();
+        assert!(matches!(
+            Qwen35CheckpointInventory::from_manifest(&config(), manifest),
+            Err(Qwen35LoaderError::UnsupportedDType { .. })
+        ));
+    }
+
+    fn tiny_safetensors(name: &str, dtype: &str, shape: &[usize], payload: &[u8]) -> Vec<u8> {
+        tiny_safetensors_multi(&[(name, dtype, shape, payload)])
+    }
+
+    fn tiny_safetensors_multi(tensors: &[(&str, &str, &[usize], &[u8])]) -> Vec<u8> {
+        let mut offset = 0usize;
+        let mut entries = Vec::new();
+        for (name, dtype, shape, payload) in tensors {
+            entries.push(format!(
+                r#""{name}":{{"dtype":"{dtype}","shape":{:?},"data_offsets":[{},{}]}}"#,
+                shape,
+                offset,
+                offset + payload.len()
+            ));
+            offset += payload.len();
+        }
+        let header = format!("{{{}}}", entries.join(","));
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
         bytes.extend_from_slice(header.as_bytes());
-        bytes.extend_from_slice(payload);
+        for (_, _, _, payload) in tensors {
+            bytes.extend_from_slice(payload);
+        }
         bytes
     }
 }
