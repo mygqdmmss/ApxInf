@@ -85,10 +85,11 @@ pub fn sse_done_sentinel() -> Vec<u8> {
 pub fn sse_error_frame(request_id: &str, error: &apxinf_model::RuntimeError) -> Vec<u8> {
     let error_type = match error {
         apxinf_model::RuntimeError::Capacity | apxinf_model::RuntimeError::QueueFull => "capacity",
+        apxinf_model::RuntimeError::WorkerStopped => "unavailable",
         apxinf_model::RuntimeError::Admission(_) => "invalid_request",
         apxinf_model::RuntimeError::Cancelled => "cancelled",
         apxinf_model::RuntimeError::Unhealthy => "unhealthy",
-        _ => "runtime_error",
+        apxinf_model::RuntimeError::Execution(_) => "runtime_error",
     };
     let body = serde_json::to_string(&json!({
         "type": "error",
@@ -177,5 +178,13 @@ mod tests {
         assert_eq!(value["type"], "error");
         assert_eq!(value["request_id"], "req-9");
         assert_eq!(value["error"]["type"], "capacity");
+    }
+
+    #[test]
+    fn sse_worker_stopped_maps_to_unavailable() {
+        let frame = super::sse_error_frame("req-10", &apxinf_model::RuntimeError::WorkerStopped);
+        let text = std::str::from_utf8(&frame).unwrap();
+        let value: Value = serde_json::from_str(text.trim_start_matches("data: ").trim()).unwrap();
+        assert_eq!(value["error"]["type"], "unavailable");
     }
 }

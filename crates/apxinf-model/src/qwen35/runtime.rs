@@ -161,13 +161,33 @@ mod cuda_runtime {
             device_id: usize,
             max_model_len: usize,
         ) -> Result<Arc<Self>, String> {
+            let backend = CudaBackend::new(device_id).map_err(|error| error.to_string())?;
+            Self::from_backend(inventory, backend, max_model_len)
+        }
+
+        pub fn from_inventory_attested(
+            inventory: &Qwen35CheckpointInventory,
+            device_id: usize,
+            expected_uuid: &str,
+            max_model_len: usize,
+        ) -> Result<Arc<Self>, String> {
+            let backend = CudaBackend::new_attested(device_id, expected_uuid)
+                .map_err(|error| error.to_string())?;
+            Self::from_backend(inventory, backend, max_model_len)
+        }
+
+        fn from_backend(
+            inventory: &Qwen35CheckpointInventory,
+            backend: CudaBackend,
+            max_model_len: usize,
+        ) -> Result<Arc<Self>, String> {
             if max_model_len == 0 || max_model_len > inventory.config.max_position_embeddings {
                 return Err(format!(
                     "max_model_len {max_model_len} is outside checkpoint range [1, {}]",
                     inventory.config.max_position_embeddings
                 ));
             }
-            let backend = CudaBackend::new(device_id).map_err(|error| error.to_string())?;
+            let device_id = backend.device_id();
             let ctx = backend.context();
             let config = inventory.config.clone();
 

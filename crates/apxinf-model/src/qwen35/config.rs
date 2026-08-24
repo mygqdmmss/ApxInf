@@ -178,6 +178,58 @@ impl Qwen35ModelConfig {
     }
 }
 
+impl Qwen35ModelConfig {
+    pub fn validate_frozen_contract(&self) -> Result<(), Qwen35ConfigError> {
+        let exact = [
+            (self.vocab_size == MODEL_VOCAB_SIZE, "vocab_size"),
+            (self.eos_token_ids == EOS_TOKEN_IDS, "eos_token_id"),
+            (self.hidden_size == 5_120, "hidden_size"),
+            (self.intermediate_size == 17_408, "intermediate_size"),
+            (self.num_hidden_layers == 64, "num_hidden_layers"),
+            (self.linear_key_heads == 16, "linear_num_key_heads"),
+            (self.linear_value_heads == 48, "linear_num_value_heads"),
+            (self.linear_head_dim == 128, "linear_head_dim"),
+            (self.linear_conv_kernel_dim == 4, "linear_conv_kernel_dim"),
+            (self.full_attention_heads == 24, "num_attention_heads"),
+            (self.full_attention_kv_heads == 4, "num_key_value_heads"),
+            (self.full_attention_head_dim == 256, "head_dim"),
+            (
+                self.max_position_embeddings == MODEL_MAX_POSITION,
+                "max_position_embeddings",
+            ),
+            (
+                self.rms_norm_eps.to_bits() == 1e-6f32.to_bits(),
+                "rms_norm_eps",
+            ),
+            (
+                self.partial_rotary_factor.to_bits() == 0.25f32.to_bits(),
+                "partial_rotary_factor",
+            ),
+            (self.attn_output_gate, "attn_output_gate"),
+        ];
+        if let Some((false, field)) = exact.into_iter().find(|(valid, _)| !valid) {
+            return Err(Qwen35ConfigError::InvalidValue(format!(
+                "model contract.{field}"
+            )));
+        }
+        if self.layer_types.len() != 64
+            || self.layer_types.iter().enumerate().any(|(index, layer)| {
+                *layer
+                    != if index % 4 == 3 {
+                        LayerType::FullAttention
+                    } else {
+                        LayerType::Gdn
+                    }
+            })
+        {
+            return Err(Qwen35ConfigError::InvalidValue(
+                "model contract.layer_types".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 fn required<'a>(
     root: &'a serde_json::Value,
     name: &str,
@@ -312,6 +364,31 @@ mod tests {
         assert!(matches!(
             super::Qwen35ModelConfig::from_json_str(&wrong),
             Err(super::Qwen35ConfigError::Architecture(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_non_frozen_dimensions_and_layer_schedule() {
+        let raw = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/qwen35-metadata/config.json"),
+        )
+        .unwrap();
+
+        let mut wrong_dimension: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        wrong_dimension["text_config"]["hidden_size"] = serde_json::json!(5121);
+        assert!(matches!(
+            super::Qwen35ModelConfig::from_json_str(&wrong_dimension.to_string())
+                .and_then(|config| config.validate_frozen_contract()),
+            Err(super::Qwen35ConfigError::InvalidValue(field)) if field == "model contract.hidden_size"
+        ));
+
+        let mut wrong_schedule: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        wrong_schedule["text_config"]["layer_types"][2] = serde_json::json!("full_attention");
+        assert!(matches!(
+            super::Qwen35ModelConfig::from_json_str(&wrong_schedule.to_string())
+                .and_then(|config| config.validate_frozen_contract()),
+            Err(super::Qwen35ConfigError::InvalidValue(field)) if field == "model contract.layer_types"
         ));
     }
 }

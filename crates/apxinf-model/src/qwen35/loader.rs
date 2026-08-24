@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use apxinf_loader::safetensors::{read_sharded_tensor_manifest, read_tensor_manifest};
 use apxinf_loader::{LoaderManifest, ManifestDType, LOADER_MANIFEST_SCHEMA, QWEN35_MODEL_REVISION};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::attention::{
@@ -28,6 +29,12 @@ pub enum Qwen35LoaderError {
     },
     #[error("checkpoint inventory is empty")]
     EmptyInventory,
+    #[error("approved checkpoint digest mismatch for `{file}`: expected {expected}, got {actual}")]
+    CheckpointDigest {
+        file: String,
+        expected: &'static str,
+        actual: String,
+    },
     #[error("unsupported tensor dtype for `{name}`: {dtype:?}")]
     UnsupportedDType { name: String, dtype: ManifestDType },
     #[error("unsupported quantization layout in config: {0}")]
@@ -124,6 +131,19 @@ pub struct GdnLayerPayload {
 }
 
 impl Qwen35CheckpointInventory {
+    /// Load only the checkpoint payloads attested for the pinned model
+    /// revision. The generic inventory constructor remains available for
+    /// metadata fixtures and offline tests.
+    pub fn from_approved_checkpoint_dir(
+        dir: impl AsRef<Path>,
+        revision: impl Into<String>,
+    ) -> Result<Self, Qwen35LoaderError> {
+        let inventory = Self::from_checkpoint_dir(dir, revision)?;
+        inventory.config.validate_frozen_contract()?;
+        inventory.verify_approved_checkpoint_digests()?;
+        Ok(inventory)
+    }
+
     pub fn from_checkpoint_dir(
         dir: impl AsRef<Path>,
         revision: impl Into<String>,
@@ -236,6 +256,48 @@ impl Qwen35CheckpointInventory {
             checkpoint_dir: None,
             tensor_shards: BTreeMap::new(),
         })
+    }
+
+    fn verify_approved_checkpoint_digests(&self) -> Result<(), Qwen35LoaderError> {
+        if self.revision != QWEN35_MODEL_REVISION {
+            return Err(Qwen35LoaderError::Revision {
+                expected: QWEN35_MODEL_REVISION,
+                actual: self.revision.clone(),
+            });
+        }
+        let actual_shards = self
+            .tensor_shards
+            .values()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let expected_shards = APPROVED_CHECKPOINT_DIGESTS
+            .iter()
+            .map(|(file, _)| *file)
+            .filter(|file| file.ends_with(".safetensors"))
+            .collect::<BTreeSet<_>>();
+        if actual_shards != expected_shards {
+            return Err(Qwen35LoaderError::Inventory(format!(
+                "checkpoint shards {actual_shards:?} do not match approved shards {expected_shards:?}"
+            )));
+        }
+        for (file, expected) in APPROVED_CHECKPOINT_DIGESTS {
+            let actual = if let Some(value) = self.source_files.get(file) {
+                value.clone()
+            } else {
+                let dir = self.checkpoint_dir.as_ref().ok_or_else(|| {
+                    Qwen35LoaderError::Io("inventory has no checkpoint payload directory".into())
+                })?;
+                sha256_file(&dir.join(file))?
+            };
+            if actual != expected {
+                return Err(Qwen35LoaderError::CheckpointDigest {
+                    file: file.to_string(),
+                    expected,
+                    actual,
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Read one tensor's raw on-disk bytes. No other tensor payload is loaded.
@@ -959,18 +1021,61 @@ impl Qwen35CheckpointInventory {
     }
 }
 
+const APPROVED_CHECKPOINT_DIGESTS: [(&str, &str); 7] = [
+    (
+        "config.json",
+        "fece2915d4c8ad4c10877622f04ea5e01cd3ae38768ce5c1edb700dd1de290f6",
+    ),
+    (
+        "model.safetensors.index.json",
+        "82b1bf79f5b61333e83da17ec3bf89c9f178e29395a14c6b3ce3bbc474e1ead8",
+    ),
+    (
+        "model-00001-of-00005.safetensors",
+        "54d83c1d36631de231876217a8e0c2483eccee8746369a482b79442bdfc5d958",
+    ),
+    (
+        "model-00002-of-00005.safetensors",
+        "64be5fc2f66a3e5679ba229261a7a0d8112b06f6f560c750a62ca9457f90006c",
+    ),
+    (
+        "model-00003-of-00005.safetensors",
+        "7b90d6c7059d615a560cd4d2e766d328210605041061681550d80f380a8b529b",
+    ),
+    (
+        "model-00004-of-00005.safetensors",
+        "03b2624ec788780a2915003cd2871c29c87dfb6f2a8d189ef3918662d6a1ed56",
+    ),
+    (
+        "model-00005-of-00005.safetensors",
+        "eb5ea1fbef28b13ac89158924ee7cfe7c9f111c79ae177b290c0abd45c38925c",
+    ),
+];
+
 fn hash_manifest(manifest: &LoaderManifest) -> Result<String, Qwen35LoaderError> {
     let encoded = serde_json::to_vec(manifest)
         .map_err(|e| Qwen35LoaderError::Io(format!("manifest serialization: {e}")))?;
-    Ok(hex_sha256(&encoded))
+    Ok(format!("{:x}", Sha256::digest(&encoded)))
 }
 
 fn sha256_file(path: &Path) -> Result<String, Qwen35LoaderError> {
-    let bytes = std::fs::read(path)
+    let mut file = std::fs::File::open(path)
         .map_err(|e| Qwen35LoaderError::Io(format!("{}: {e}", path.display())))?;
-    Ok(hex_sha256(&bytes))
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|e| Qwen35LoaderError::Io(format!("{}: {e}", path.display())))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
+#[cfg(test)]
 fn hex_sha256(bytes: &[u8]) -> String {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
@@ -1091,6 +1196,40 @@ mod tests {
             hex_sha256(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn streaming_file_digest_matches_standard_sha256_across_block_boundaries() {
+        let bytes = (0..1_100_123usize)
+            .map(|index| (index.wrapping_mul(31) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("payload.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(sha256_file(&path).unwrap(), hex_sha256(&bytes));
+    }
+
+    #[test]
+    fn approved_checkpoint_loader_rejects_unattested_fixture_shards() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("config.json"), config()).unwrap();
+        let shard_name = "model-00001-of-00001.safetensors";
+        std::fs::write(
+            directory.path().join(shard_name),
+            tiny_safetensors("embed_tokens.weight", "F32", &[2], &[1, 2, 3, 4]),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("model.safetensors.index.json"),
+            format!(r#"{{"weight_map":{{"embed_tokens.weight":"{shard_name}"}}}}"#),
+        )
+        .unwrap();
+        let error = Qwen35CheckpointInventory::from_approved_checkpoint_dir(
+            directory.path(),
+            QWEN35_MODEL_REVISION,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("checkpoint shards"));
     }
 
     #[test]

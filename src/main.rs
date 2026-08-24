@@ -180,7 +180,7 @@ fn validate_serve_args(args: &ServeArgs) -> Result<(), String> {
 
 fn run_serve(args: ServeArgs) -> Result<(), String> {
     validate_serve_args(&args)?;
-    let inventory = apxinf_model::Qwen35CheckpointInventory::from_checkpoint_dir(
+    let inventory = apxinf_model::Qwen35CheckpointInventory::from_approved_checkpoint_dir(
         &args.model,
         args.revision.clone(),
     )
@@ -264,8 +264,13 @@ fn run_serve(args: ServeArgs) -> Result<(), String> {
         use server::qwen35_runtime::{Qwen35CudaStepExecutor, Qwen35ProtocolRuntime};
         use server::service::ProtocolService;
 
-        let model = Qwen35CudaModel::from_inventory(&inventory, device_id, args.max_model_len)
-            .map_err(|error| format!("CUDA Qwen3.5 initialization failed: {error}"))?;
+        let model = Qwen35CudaModel::from_inventory_attested(
+            &inventory,
+            device_id,
+            &args.gpu_uuid,
+            args.max_model_len,
+        )
+        .map_err(|error| format!("CUDA Qwen3.5 initialization failed: {error}"))?;
         let memory = model
             .memory_info()
             .map_err(|error| format!("CUDA memory query failed: {error}"))?;

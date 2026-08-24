@@ -222,7 +222,7 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
     /// the previous request left the service unhealthy.
     pub fn health_response(&self) -> HttpResponse {
         if !self.ready.load(Ordering::Acquire) {
-            let _guard = self.recovery_lock.lock().ok();
+            let _guard = self.recovery_guard();
             if !self.ready.load(Ordering::Acquire) {
                 let _ = self.warmup_inner();
             }
@@ -236,11 +236,15 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
     }
 
     pub fn warmup(&self) -> Result<(), RuntimeError> {
-        let _guard = self
-            .recovery_lock
-            .lock()
-            .map_err(|_| RuntimeError::WorkerStopped)?;
+        let _guard = self.recovery_guard();
         self.warmup_inner()
+    }
+
+    fn recovery_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        match self.recovery_lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     fn warmup_inner(&self) -> Result<(), RuntimeError> {
@@ -368,10 +372,11 @@ pub(crate) fn runtime_response(error: RuntimeError) -> HttpResponse {
     let (status, error_type) = match error {
         RuntimeError::Capacity => (503, "capacity"),
         RuntimeError::QueueFull => (503, "capacity"),
+        RuntimeError::WorkerStopped => (503, "unavailable"),
         RuntimeError::Admission(_) => (400, "invalid_request"),
         RuntimeError::Cancelled => (499, "cancelled"),
         RuntimeError::Unhealthy => (503, "unhealthy"),
-        _ => (500, "runtime_error"),
+        RuntimeError::Execution(_) => (500, "runtime_error"),
     };
     let protocol_error = ProtocolError {
         error_type,
@@ -654,6 +659,26 @@ mod tests {
             ProtocolService::new(FakeRuntime::new(vec![]).with_vocab_size(248_044), true)
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn worker_stopped_maps_to_unavailable_503() {
+        let response = super::runtime_response(RuntimeError::WorkerStopped);
+        assert_eq!(response.status, 503);
+        let value: Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value["error"]["type"], "unavailable");
+    }
+
+    #[test]
+    fn poisoned_recovery_mutex_still_provides_a_serialized_guard() {
+        let service = ProtocolService::new(FakeRuntime::new(vec![]), true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = service.recovery_lock.lock().unwrap();
+            panic!("poison recovery lock");
+        }));
+        assert!(result.is_err());
+        let guard = service.recovery_guard();
+        drop(guard);
     }
 
     #[test]
