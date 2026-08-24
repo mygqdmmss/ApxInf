@@ -129,7 +129,10 @@ mod tests {
 
     #[test]
     fn greedy_argmax_accepts_model_vocab_boundary_and_rejects_wrong_width() {
-        assert_eq!(greedy_argmax(&[0.0, 1.0, 1.0], 3).unwrap(), 1);
+        assert_eq!(greedy_argmax(&[0.0, 1.0, 1.0], 3).unwrap(), 2);
+        assert_eq!(greedy_argmax(&[0.0, 21.375, 21.25], 3).unwrap(), 1);
+        assert_eq!(greedy_argmax(&[0.0, 1.0, 0.875_001], 3).unwrap(), 1);
+        assert_eq!(greedy_argmax(&[0.0, 1.0, 0.875], 3).unwrap(), 1);
         assert!(greedy_argmax(&[0.0, 1.0], 3).is_err());
     }
 }
@@ -397,18 +400,22 @@ pub fn greedy_argmax(logits: &[f32], vocab_size: usize) -> Result<u32, ExecutorE
     if logits.iter().any(|value| !value.is_finite()) {
         return Err(ExecutorError::NonFiniteLogits);
     }
-    let index = logits
+    // Keep the highest token id when logits are exactly equal. This is the
+    // deterministic tie rule used by the checkpoint trajectory artifacts;
+    // near-ties must not be treated as ties because temperature=0 is exact
+    // greedy decoding.
+    let maximum_index = logits
         .iter()
         .enumerate()
         .max_by(|(left_index, left), (right_index, right)| {
             left.partial_cmp(right)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| right_index.cmp(left_index))
+                .then_with(|| left_index.cmp(right_index))
         })
         .map(|(index, _)| index)
         .ok_or(ExecutorError::WrongLogitWidth {
             expected: vocab_size,
             got: 0,
         })?;
-    Ok(index as u32)
+    Ok(maximum_index as u32)
 }

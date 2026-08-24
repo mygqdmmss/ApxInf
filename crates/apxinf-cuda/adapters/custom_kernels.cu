@@ -13,6 +13,7 @@ namespace {
 #include "../kernels/custom/reduction.cuh"
 #include "../kernels/custom/quantization.cuh"
 #include "../kernels/custom/qwen35_w4.cuh"
+#include "../kernels/custom/qwen35_gdn.cuh"
 #include "../kernels/custom/preprocess.cuh"
 #include "../kernels/custom/attention.cuh"
 #include "../kernels/custom/normalization.cuh"
@@ -22,6 +23,18 @@ namespace {
 #include "../kernels/custom/fused.cuh"
 #include "../kernels/custom/cache.cuh"
 }  // namespace
+
+extern "C" cudaError_t apxinf_qwen35_gdn_check_finite_bf16(
+    const void* input, void* error_flags, int elements, cudaStream_t stream) {
+  if (input == nullptr || error_flags == nullptr || elements <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  const int blocks = (elements + 255) / 256;
+  qwen35_gdn_check_finite_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<uint32_t*>(error_flags), elements);
+  return cudaGetLastError();
+}
 
 extern "C" cudaError_t apxinf_static_qwen35_w4_project_bf16(
     const void* activation, const void* weight_packed, const void* scales,
@@ -42,6 +55,123 @@ extern "C" cudaError_t apxinf_static_qwen35_w4_project_bf16(
       static_cast<__nv_bfloat16*>(output),
       static_cast<uint32_t*>(error_flags), rows, out_features, in_features,
       group_size);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_qwen35_gdn_conv_bf16(
+    const void* ring_in, void* ring_out, const void* input,
+    const void* weights, void* output, void* error_flags, int channels,
+    int kernel, int cursor, cudaStream_t stream) {
+  if (ring_in == nullptr || ring_out == nullptr || input == nullptr ||
+      weights == nullptr || output == nullptr || error_flags == nullptr ||
+      channels <= 0 || kernel <= 0 || cursor < 0 || cursor >= kernel) {
+    return cudaErrorInvalidValue;
+  }
+  int blocks = (channels + 255) / 256;
+  qwen35_gdn_conv_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(ring_in),
+      static_cast<__nv_bfloat16*>(ring_out),
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weights),
+      static_cast<__nv_bfloat16*>(output),
+      static_cast<uint32_t*>(error_flags), channels, kernel, cursor);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_qwen35_gdn_conv_prefill_bf16(
+    const void* ring_in, void* ring_out, const void* input,
+    const void* weights, void* output, void* error_flags, int rows,
+    int channels, int kernel, int cursor, cudaStream_t stream) {
+  if (ring_in == nullptr || ring_out == nullptr || input == nullptr ||
+      weights == nullptr || output == nullptr || error_flags == nullptr ||
+      rows <= 0 || channels <= 0 || kernel <= 0 || cursor < 0 ||
+      cursor >= kernel) {
+    return cudaErrorInvalidValue;
+  }
+  int blocks = (channels + 255) / 256;
+  qwen35_gdn_conv_prefill_bf16_kernel<<<blocks, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(ring_in),
+      static_cast<__nv_bfloat16*>(ring_out),
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weights),
+      static_cast<__nv_bfloat16*>(output), static_cast<uint32_t*>(error_flags),
+      rows, channels, kernel, cursor);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_qwen35_gdn_recurrent_bf16_f32(
+    const void* state_in, void* state_out, const void* query, const void* key,
+    const void* value, const void* a, const void* b, const void* a_log,
+    const void* dt_bias, void* output, void* error_flags, int key_heads,
+    int value_heads, int key_dim, int value_dim, cudaStream_t stream) {
+  if (state_in == nullptr || state_out == nullptr || query == nullptr ||
+      key == nullptr || value == nullptr || a == nullptr || b == nullptr ||
+      a_log == nullptr || dt_bias == nullptr || output == nullptr ||
+      error_flags == nullptr || key_heads <= 0 || value_heads <= 0 ||
+      value_heads % key_heads != 0 || key_dim <= 0 || value_dim <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  qwen35_gdn_recurrent_bf16_f32_kernel<<<value_heads, 256, 0, stream>>>(
+      static_cast<const float*>(state_in), static_cast<float*>(state_out),
+      static_cast<const __nv_bfloat16*>(query),
+      static_cast<const __nv_bfloat16*>(key),
+      static_cast<const __nv_bfloat16*>(value),
+      static_cast<const __nv_bfloat16*>(a),
+      static_cast<const __nv_bfloat16*>(b),
+      static_cast<const __nv_bfloat16*>(a_log),
+      static_cast<const __nv_bfloat16*>(dt_bias),
+      static_cast<__nv_bfloat16*>(output),
+      static_cast<uint32_t*>(error_flags), key_heads, value_heads, key_dim,
+      value_dim);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_qwen35_gdn_sequence_recurrent_bf16_f32(
+    const void* state_in, void* state_out, const void* query, const void* key,
+    const void* value, const void* a, const void* b, const void* a_log,
+    const void* dt_bias, void* output, void* error_flags, int rows,
+    int key_heads, int value_heads, int key_dim, int value_dim,
+    void* workspace, int64_t workspace_stride,
+    cudaStream_t stream) {
+  if (state_in == nullptr || state_out == nullptr || query == nullptr ||
+      key == nullptr || value == nullptr || a == nullptr || b == nullptr ||
+      a_log == nullptr || dt_bias == nullptr || output == nullptr ||
+      error_flags == nullptr || workspace == nullptr || workspace_stride <= 0 ||
+      rows <= 0 || key_heads <= 0 ||
+      value_heads <= 0 || value_heads % key_heads != 0 || key_dim <= 0 ||
+      value_dim <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  qwen35_gdn_sequence_recurrent_bf16_f32_kernel<<<value_heads, 1, 0, stream>>>(
+      static_cast<const float*>(state_in), static_cast<float*>(state_out),
+      static_cast<const __nv_bfloat16*>(query),
+      static_cast<const __nv_bfloat16*>(key),
+      static_cast<const __nv_bfloat16*>(value),
+      static_cast<const __nv_bfloat16*>(a),
+      static_cast<const __nv_bfloat16*>(b),
+      static_cast<const __nv_bfloat16*>(a_log),
+      static_cast<const __nv_bfloat16*>(dt_bias),
+      static_cast<__nv_bfloat16*>(output), static_cast<uint32_t*>(error_flags),
+      rows, key_heads, value_heads, key_dim, value_dim,
+      static_cast<float*>(workspace), workspace_stride);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_qwen35_gdn_gated_rms_norm_bf16(
+    const void* input, const void* gate, const void* weight, void* output,
+    void* error_flags, int rows, int heads, int head_dim, float eps,
+    cudaStream_t stream) {
+  if (input == nullptr || gate == nullptr || weight == nullptr ||
+      output == nullptr || error_flags == nullptr || rows <= 0 || heads <= 0 ||
+      head_dim <= 0 || !(eps > 0.0f) || !isfinite(eps)) {
+    return cudaErrorInvalidValue;
+  }
+  qwen35_gdn_gated_rms_norm_bf16_kernel<<<rows * heads, 256, 0, stream>>>(
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(gate),
+      static_cast<const __nv_bfloat16*>(weight),
+      static_cast<__nv_bfloat16*>(output),
+      static_cast<uint32_t*>(error_flags), rows, heads, head_dim, eps);
   return cudaGetLastError();
 }
 

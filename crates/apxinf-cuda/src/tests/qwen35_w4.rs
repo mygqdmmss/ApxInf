@@ -50,6 +50,39 @@ fn cpu_reference(
     output
 }
 
+fn cpu_reference_with_bf16_dequantized_weights(
+    layout: Qwen35W4Layout,
+    activation: &[f32],
+    weights: &[u32],
+    scales: &[f32],
+    zero_points: &[u32],
+) -> Vec<f32> {
+    let activation = activation
+        .iter()
+        .map(|value| bf16::from_f32(*value).to_f32())
+        .collect::<Vec<_>>();
+    let scales = scales
+        .iter()
+        .map(|value| bf16::from_f32(*value).to_f32())
+        .collect::<Vec<_>>();
+    let mut output = vec![0.0; layout.out_features];
+    for out in 0..layout.out_features {
+        for k in 0..layout.in_features {
+            let group = k / layout.group_size;
+            let packed = weights[out * layout.packed_k_columns() + k / 8];
+            let quantized = ((packed >> (4 * (k % 8))) & 0x0f) as f32;
+            let packed_zero = zero_points[(out / 8) * layout.groups() + group];
+            let zero_point = ((packed_zero >> (4 * (out % 8))) & 0x0f) as f32;
+            let weight =
+                bf16::from_f32((quantized - zero_point) * scales[out * layout.groups() + group])
+                    .to_f32();
+            output[out] += activation[k] * weight;
+        }
+        output[out] = bf16::from_f32(output[out]).to_f32();
+    }
+    output
+}
+
 #[test]
 fn qwen35_w4_cuda_projection_matches_k_and_n_packed_cpu_reference() {
     let ctx = CudaContext::new(0).expect("CUDA device required");
@@ -96,6 +129,40 @@ fn qwen35_w4_cuda_projection_matches_k_and_n_packed_cpu_reference() {
 }
 
 #[test]
+fn qwen35_w4_cuda_projection_matches_bf16_checkpoint_decompression_rounding() {
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let layout = Qwen35W4Layout::new(1, 2, 32).unwrap();
+    let activation_values = [1.296875, 0.010009765625];
+    let weights = [0x0000_0047u32];
+    let scale_values = [0.010009765625f32];
+    let zero_points = [0u32];
+    let expected = cpu_reference_with_bf16_dequantized_weights(
+        layout,
+        &activation_values,
+        &weights,
+        &scale_values,
+        &zero_points,
+    );
+    let activation = upload_fp32_as_bf16(&ctx, &activation_values, vec![1, 2]).unwrap();
+    let scales = upload_fp32_as_bf16(&ctx, &scale_values, vec![1, 1]).unwrap();
+    let weights = upload_u32(&ctx, &weights);
+    let zero_points = upload_u32(&ctx, &zero_points);
+
+    let output = project_bf16(
+        &ctx,
+        &activation,
+        Qwen35W4Buffers {
+            weight_packed: &weights,
+            scales: &scales,
+            zero_points: &zero_points,
+        },
+        layout,
+    )
+    .unwrap();
+    assert_eq!(download_bf16_as_fp32(&output).unwrap(), expected);
+}
+
+#[test]
 fn qwen35_w4_device_projection_owns_uploaded_w4_payloads() {
     let ctx = CudaContext::new(0).expect("CUDA device required");
     let layout = Qwen35W4Layout::new(2, 3, 32).unwrap();
@@ -115,7 +182,10 @@ fn qwen35_w4_device_projection_owns_uploaded_w4_payloads() {
     let projection = Qwen35W4DeviceProjection::upload(
         &ctx,
         layout,
-        &weights.iter().flat_map(|value| value.to_le_bytes()).collect::<Vec<_>>(),
+        &weights
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>(),
         &scales,
         &zero_points
             .iter()

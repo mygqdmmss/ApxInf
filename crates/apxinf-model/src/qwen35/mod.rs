@@ -6,12 +6,14 @@ pub mod cuda;
 pub mod gdn;
 pub mod loader;
 pub mod model;
+pub mod runtime;
 pub mod weights;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    Qwen35AttentionProjectionTensors, Qwen35CheckpointProjection, Qwen35CudaFullAttentionLayer,
-    Qwen35CudaFullAttentionState,
+    Qwen35AttentionProjectionTensors, Qwen35Bf16Projection, Qwen35CheckpointProjection,
+    Qwen35CudaFullAttentionLayer, Qwen35CudaFullAttentionState, Qwen35CudaGdnLayer,
+    Qwen35CudaGdnState, Qwen35MixedProjection,
 };
 
 pub use admission::{
@@ -27,9 +29,15 @@ pub use config::{
     LayerType, Qwen35Config, Qwen35ConfigError, Qwen35ModelConfig, IMAGE_TOKEN_ID, MODEL_VOCAB_SIZE,
 };
 pub use gdn::{GdnDimensions, GdnError, GdnState};
-pub use loader::{Qwen35CheckpointInventory, Qwen35LoaderError};
+pub use loader::{
+    Bf16TensorPayload, GdnLayerPayload, LinearPayload, PackedLinearPayload,
+    Qwen35CheckpointInventory, Qwen35LoaderError,
+};
 pub use model::{
     greedy_argmax, ExecutorError, GenerationOutput, Qwen35ReferenceExecutor, Qwen35RequestState,
     StopReason,
 };
+pub use runtime::request_state_bytes;
+#[cfg(feature = "cuda")]
+pub use runtime::{Qwen35CudaModel, Qwen35CudaSession};
 pub use weights::{PackedLinearLayout, WeightLayoutError};

@@ -196,7 +196,9 @@ mod tests {
         }
         let scales = vec![1.0; layout.out_features * layout.groups()];
         let zero_points = vec![0u32; layout.packed_n_rows() * layout.groups()];
-        let result = layout.matvec_f32(&packed, &scales, &zero_points, &[1.0; 5]).unwrap();
+        let result = layout
+            .matvec_f32(&packed, &scales, &zero_points, &[1.0; 5])
+            .unwrap();
         assert_eq!(result.len(), 9);
         assert_eq!(result[0], 6.0);
         assert_eq!(result[8], 6.0);

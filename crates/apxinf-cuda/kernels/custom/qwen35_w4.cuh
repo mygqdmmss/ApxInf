@@ -30,7 +30,12 @@ __global__ void qwen35_w4_project_bf16_kernel(
     if (!isfinite(scale)) atomicOr(error_flags, 1U);
     const float value =
         __bfloat162float(activation[static_cast<int64_t>(row) * in_features + k]);
-    sum += value * (quantized - zero_point) * scale;
+    const float dequantized = (quantized - zero_point) * scale;
+    // compressed-tensors decompresses each packed weight to the model's
+    // native BF16 dtype before the BF16 linear consumes it. Preserve that
+    // rounding boundary instead of multiplying by an unrounded FP32 value.
+    const float weight = __bfloat162float(__float2bfloat16(dequantized));
+    sum += value * weight;
   }
   partial[threadIdx.x] = sum;
   __syncthreads();

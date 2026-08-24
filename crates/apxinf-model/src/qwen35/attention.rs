@@ -75,8 +75,7 @@ impl FullAttentionReferenceLayer {
         }
         let normalized = rms_norm_f32(hidden, c.hidden_size, &self.input_norm, c.rms_epsilon)?;
         let qkv_qgate = self.q_proj.apply(&normalized)?;
-        let mut q = qkv_qgate[..c.n_query_heads * c.head_dim].to_vec();
-        let gate = qkv_qgate[c.n_query_heads * c.head_dim..].to_vec();
+        let (mut q, gate) = split_q_gate_f32(&qkv_qgate, c.n_query_heads, c.head_dim)?;
         let mut k = self.k_proj.apply(&normalized)?;
         let v = self.v_proj.apply(&normalized)?;
         q = qk_norm_f32(
@@ -186,11 +185,38 @@ pub fn rms_norm_f32(
         output.extend(
             row.iter()
                 .zip(weight)
-                .map(|(value, scale)| value * inverse_rms * scale),
+                .map(|(value, scale)| value * inverse_rms * (1.0 + scale)),
         );
     }
     require_finite("RMSNorm output", &output)?;
     Ok(output)
+}
+
+/// Split Qwen3.5's fused attention projection. The checkpoint stores each
+/// query head as `[q_head, gate_head]`, so the gate is not a contiguous global
+/// half of the projection output.
+pub fn split_q_gate_f32(
+    q_gate: &[f32],
+    n_heads: usize,
+    head_dim: usize,
+) -> Result<(Vec<f32>, Vec<f32>), AttentionError> {
+    if n_heads == 0
+        || head_dim == 0
+        || q_gate.len() != n_heads.saturating_mul(head_dim).saturating_mul(2)
+    {
+        return Err(AttentionError::Shape {
+            name: "Qwen3.5 q/gate projection",
+        });
+    }
+    require_finite("Qwen3.5 q/gate projection", q_gate)?;
+    let mut query = Vec::with_capacity(n_heads * head_dim);
+    let mut gate = Vec::with_capacity(n_heads * head_dim);
+    for head in 0..n_heads {
+        let base = head * head_dim * 2;
+        query.extend_from_slice(&q_gate[base..base + head_dim]);
+        gate.extend_from_slice(&q_gate[base + head_dim..base + 2 * head_dim]);
+    }
+    Ok((query, gate))
 }
 
 pub fn apply_partial_rope_f32(
@@ -615,9 +641,17 @@ mod tests {
         let weight = [2.0, 0.5];
         let output = rms_norm_f32(&input, 2, &weight, 0.0).unwrap();
         let rms = ((9.0f32 + 16.0) / 2.0).sqrt();
-        assert!((output[0] - 6.0 / rms).abs() < 1e-6);
-        assert!((output[1] - 2.0 / rms).abs() < 1e-6);
+        assert!((output[0] - 9.0 / rms).abs() < 1e-6);
+        assert!((output[1] - 6.0 / rms).abs() < 1e-6);
         assert_eq!(&output[2..], &[0.0, 0.0]);
+    }
+
+    #[test]
+    fn full_attention_q_gate_split_preserves_per_head_checkpoint_order() {
+        let q_gate = (0..8).map(|value| value as f32).collect::<Vec<_>>();
+        let (query, gate) = split_q_gate_f32(&q_gate, 2, 2).unwrap();
+        assert_eq!(query, vec![0.0, 1.0, 4.0, 5.0]);
+        assert_eq!(gate, vec![2.0, 3.0, 6.0, 7.0]);
     }
 
     #[test]
@@ -641,7 +675,7 @@ mod tests {
     #[test]
     fn qk_norm_normalizes_each_head_independently() {
         let input = [3.0, 4.0, 0.0, 5.0];
-        let output = qk_norm_f32(&input, 1, 2, 2, &[1.0, 1.0], 0.0).unwrap();
+        let output = qk_norm_f32(&input, 1, 2, 2, &[0.0, 0.0], 0.0).unwrap();
         let first_rms = (12.5f32).sqrt();
         let second_rms = (12.5f32).sqrt();
         assert!((output[0] - 3.0 / first_rms).abs() < 1e-6);
@@ -722,10 +756,10 @@ mod tests {
                 rope_theta: 10_000.0,
                 rms_epsilon: 0.0,
             },
-            input_norm: vec![1.0; 2],
-            q_norm: vec![1.0; 2],
-            k_norm: vec![1.0; 2],
-            post_attention_norm: vec![1.0; 2],
+            input_norm: vec![0.0; 2],
+            q_norm: vec![0.0; 2],
+            k_norm: vec![0.0; 2],
+            post_attention_norm: vec![0.0; 2],
             q_proj: packed_linear(4, 2, &identity2),
             k_proj: packed_linear(2, 2, &identity2),
             v_proj: packed_linear(2, 2, &identity2),

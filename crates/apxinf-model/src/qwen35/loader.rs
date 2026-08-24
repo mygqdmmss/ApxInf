@@ -45,6 +45,14 @@ pub enum Qwen35LoaderError {
     },
     #[error("projection `{base}` has invalid shape metadata: {details}")]
     ProjectionShape { base: String, details: String },
+    #[error("tensor `{name}` has dtype {dtype:?}, expected BF16")]
+    TensorDType { name: String, dtype: ManifestDType },
+    #[error("tensor `{name}` has shape {actual:?}, expected {expected:?}")]
+    TensorShape {
+        name: String,
+        expected: Vec<usize>,
+        actual: Vec<usize>,
+    },
     #[error("projection `{base}` layout validation failed: {source}")]
     ProjectionLayout {
         base: String,
@@ -70,6 +78,49 @@ pub struct PackedLinearPayload {
     pub weight_packed: Vec<u32>,
     pub scales_bf16: Vec<half::bf16>,
     pub zero_points: Vec<u32>,
+}
+
+/// A native BF16 checkpoint tensor. The values retain the checkpoint's BF16
+/// rounding; callers decide when and where to upload or transpose them.
+#[derive(Debug, Clone)]
+pub struct Bf16TensorPayload {
+    pub shape: Vec<usize>,
+    pub values: Vec<half::bf16>,
+}
+
+impl Bf16TensorPayload {
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum LinearPayload {
+    Packed(PackedLinearPayload),
+    Bf16(Bf16TensorPayload),
+}
+
+#[derive(Debug, Clone)]
+pub struct GdnLayerPayload {
+    pub layer_index: usize,
+    pub input_norm: Bf16TensorPayload,
+    pub in_proj_qkv: PackedLinearPayload,
+    pub in_proj_z: PackedLinearPayload,
+    pub in_proj_a: Bf16TensorPayload,
+    pub in_proj_b: Bf16TensorPayload,
+    pub conv1d_weight: Bf16TensorPayload,
+    pub a_log: Bf16TensorPayload,
+    pub dt_bias: Bf16TensorPayload,
+    pub norm: Bf16TensorPayload,
+    pub out_proj: LinearPayload,
+    pub post_attention_norm: Bf16TensorPayload,
+    pub mlp_gate_proj: PackedLinearPayload,
+    pub mlp_up_proj: PackedLinearPayload,
+    pub mlp_down_proj: PackedLinearPayload,
 }
 
 impl Qwen35CheckpointInventory {
@@ -342,6 +393,129 @@ impl Qwen35CheckpointInventory {
             .collect())
     }
 
+    /// Read a BF16 tensor after validating its complete shape metadata.
+    /// Payload bytes are not touched until dtype, shape, and element-count
+    /// checks have passed.
+    pub fn read_bf16_tensor_payload(
+        &self,
+        name: &str,
+        expected_shape: &[usize],
+    ) -> Result<Bf16TensorPayload, Qwen35LoaderError> {
+        let manifest = self.bf16_tensor_manifest(name, expected_shape)?;
+        let shape = manifest.shape.clone();
+        let expected_len = shape
+            .iter()
+            .try_fold(1usize, |value, dimension| value.checked_mul(*dimension))
+            .ok_or_else(|| Qwen35LoaderError::TensorShape {
+                name: name.to_owned(),
+                expected: expected_shape.to_vec(),
+                actual: shape.clone(),
+            })?;
+        let values = self.read_tensor_bf16(name)?;
+        if values.len() != expected_len {
+            return Err(Qwen35LoaderError::TensorShape {
+                name: name.to_owned(),
+                expected: expected_shape.to_vec(),
+                actual: vec![values.len()],
+            });
+        }
+        Ok(Bf16TensorPayload { shape, values })
+    }
+
+    /// Assemble one GDN layer's mixed W4/BF16 checkpoint payloads. All
+    /// manifest checks happen before the first payload read, so an invalid
+    /// layout cannot partially materialize a large projection.
+    pub fn read_gdn_layer_payload(
+        &self,
+        layer_index: usize,
+    ) -> Result<GdnLayerPayload, Qwen35LoaderError> {
+        if self.config.layer_types.get(layer_index) != Some(&super::config::LayerType::Gdn) {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: format!("model.language_model.layers.{layer_index}"),
+                details: "requested layer is not GDN".into(),
+            });
+        }
+        let prefix = format!("model.language_model.layers.{layer_index}");
+        let hidden = self.config.hidden_size;
+        let key_width = self.config.linear_key_heads * self.config.linear_head_dim;
+        let value_width = self.config.linear_value_heads * self.config.linear_head_dim;
+        let conv_channels = key_width * 2 + value_width;
+        let qkv_layout = PackedLinearLayout::new(conv_channels, hidden, 32);
+        let z_layout = PackedLinearLayout::new(value_width, hidden, 32);
+        let mlp_gate_layout = PackedLinearLayout::new(self.config.intermediate_size, hidden, 32);
+        let mlp_down_layout = PackedLinearLayout::new(hidden, self.config.intermediate_size, 32);
+
+        let input_norm_name = format!("{prefix}.input_layernorm.weight");
+        let qkv_base = format!("{prefix}.linear_attn.in_proj_qkv");
+        let z_base = format!("{prefix}.linear_attn.in_proj_z");
+        let a_name = format!("{prefix}.linear_attn.in_proj_a.weight");
+        let b_name = format!("{prefix}.linear_attn.in_proj_b.weight");
+        let conv_name = format!("{prefix}.linear_attn.conv1d.weight");
+        let a_log_name = format!("{prefix}.linear_attn.A_log");
+        let dt_name = format!("{prefix}.linear_attn.dt_bias");
+        let norm_name = format!("{prefix}.linear_attn.norm.weight");
+        let out_base = format!("{prefix}.linear_attn.out_proj");
+        let post_norm_name = format!("{prefix}.post_attention_layernorm.weight");
+        let gate_base = format!("{prefix}.mlp.gate_proj");
+        let up_base = format!("{prefix}.mlp.up_proj");
+        let down_base = format!("{prefix}.mlp.down_proj");
+
+        // Metadata-only phase. Packed projection shapes are checked after
+        // their tiny I64 shape payload is decoded, but all suffix metadata is
+        // validated here before any large byte range is read.
+        self.bf16_tensor_manifest(&input_norm_name, &[hidden])?;
+        self.bf16_tensor_manifest(&a_name, &[self.config.linear_value_heads, hidden])?;
+        self.bf16_tensor_manifest(&b_name, &[self.config.linear_value_heads, hidden])?;
+        self.bf16_tensor_manifest(
+            &conv_name,
+            &[conv_channels, 1, self.config.linear_conv_kernel_dim],
+        )?;
+        self.bf16_tensor_manifest(&a_log_name, &[self.config.linear_value_heads])?;
+        self.bf16_tensor_manifest(&dt_name, &[self.config.linear_value_heads])?;
+        self.bf16_tensor_manifest(&norm_name, &[self.config.linear_head_dim])?;
+        self.bf16_tensor_manifest(&post_norm_name, &[hidden])?;
+        self.validate_packed_projection_metadata(&qkv_base, &qkv_layout)?;
+        self.validate_packed_projection_metadata(&z_base, &z_layout)?;
+        self.validate_linear_metadata(&out_base, &[hidden, value_width])?;
+        self.validate_packed_projection_metadata(&gate_base, &mlp_gate_layout)?;
+        self.validate_packed_projection_metadata(&up_base, &mlp_gate_layout)?;
+        self.validate_packed_projection_metadata(&down_base, &mlp_down_layout)?;
+
+        // Decode only the tiny packed shape metadata after every manifest has
+        // passed validation, still before reading any large tensor payload.
+        self.validate_packed_projection_shape_payload(&qkv_base, &qkv_layout)?;
+        self.validate_packed_projection_shape_payload(&z_base, &z_layout)?;
+        self.validate_linear_shape_payload(&out_base, &[hidden, value_width])?;
+        self.validate_packed_projection_shape_payload(&gate_base, &mlp_gate_layout)?;
+        self.validate_packed_projection_shape_payload(&up_base, &mlp_gate_layout)?;
+        self.validate_packed_projection_shape_payload(&down_base, &mlp_down_layout)?;
+
+        // Payload phase starts only after the full layer contract is known.
+        let out_proj = self.read_linear_payload(&out_base, &[hidden, value_width])?;
+        Ok(GdnLayerPayload {
+            layer_index,
+            input_norm: self.read_bf16_tensor_payload(&input_norm_name, &[hidden])?,
+            in_proj_qkv: self.read_checked_packed_payload(&qkv_base, &qkv_layout)?,
+            in_proj_z: self.read_checked_packed_payload(&z_base, &z_layout)?,
+            in_proj_a: self
+                .read_bf16_tensor_payload(&a_name, &[self.config.linear_value_heads, hidden])?,
+            in_proj_b: self
+                .read_bf16_tensor_payload(&b_name, &[self.config.linear_value_heads, hidden])?,
+            conv1d_weight: self.read_bf16_tensor_payload(
+                &conv_name,
+                &[conv_channels, 1, self.config.linear_conv_kernel_dim],
+            )?,
+            a_log: self.read_bf16_tensor_payload(&a_log_name, &[self.config.linear_value_heads])?,
+            dt_bias: self.read_bf16_tensor_payload(&dt_name, &[self.config.linear_value_heads])?,
+            norm: self.read_bf16_tensor_payload(&norm_name, &[self.config.linear_head_dim])?,
+            out_proj,
+            post_attention_norm: self.read_bf16_tensor_payload(&post_norm_name, &[hidden])?,
+            mlp_gate_proj: self.read_checked_packed_payload(&gate_base, &mlp_gate_layout)?,
+            mlp_up_proj: self.read_checked_packed_payload(&up_base, &mlp_gate_layout)?,
+            mlp_down_proj: self.read_checked_packed_payload(&down_base, &mlp_down_layout)?,
+        })
+    }
+
     /// Read one asymmetric W4 projection without materializing any other tensor.
     pub fn read_packed_linear(
         &self,
@@ -551,6 +725,177 @@ impl Qwen35CheckpointInventory {
                 base: base.to_owned(),
                 suffix,
             })
+    }
+
+    fn bf16_tensor_manifest(
+        &self,
+        name: &str,
+        expected_shape: &[usize],
+    ) -> Result<&apxinf_loader::TensorManifest, Qwen35LoaderError> {
+        let manifest = self.tensor_manifest(name)?;
+        if manifest.dtype != ManifestDType::BF16 {
+            return Err(Qwen35LoaderError::TensorDType {
+                name: name.to_owned(),
+                dtype: manifest.dtype.clone(),
+            });
+        }
+        if manifest.shape != expected_shape {
+            return Err(Qwen35LoaderError::TensorShape {
+                name: name.to_owned(),
+                expected: expected_shape.to_vec(),
+                actual: manifest.shape.clone(),
+            });
+        }
+        Ok(manifest)
+    }
+
+    fn validate_packed_projection_metadata(
+        &self,
+        base: &str,
+        expected_layout: &PackedLinearLayout,
+    ) -> Result<(), Qwen35LoaderError> {
+        let shape_manifest = self.tensor_manifest_or_projection(base, "weight_shape")?;
+        if shape_manifest.dtype != ManifestDType::Other("I64".to_owned())
+            || shape_manifest.shape != [2]
+        {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!(
+                    "weight_shape must be I64 [2], got {:?} {:?}",
+                    shape_manifest.dtype, shape_manifest.shape
+                ),
+            });
+        }
+        let packed = self.tensor_manifest_or_projection(base, "weight_packed")?;
+        let scales = self.tensor_manifest_or_projection(base, "weight_scale")?;
+        let zero_points = self.tensor_manifest_or_projection(base, "weight_zero_point")?;
+        if packed.dtype != ManifestDType::I32
+            || scales.dtype != ManifestDType::BF16
+            || zero_points.dtype != ManifestDType::I32
+        {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: "packed projection dtypes must be I32/BF16/I32".into(),
+            });
+        }
+        expected_layout
+            .validate_shapes(&packed.shape, &scales.shape, &zero_points.shape)
+            .map_err(|source| Qwen35LoaderError::ProjectionLayout {
+                base: base.to_owned(),
+                source,
+            })
+    }
+
+    fn validate_packed_projection_shape_payload(
+        &self,
+        base: &str,
+        expected_layout: &PackedLinearLayout,
+    ) -> Result<(), Qwen35LoaderError> {
+        let shape_name = format!("{base}.weight_shape");
+        let dimensions = self.read_tensor_i64(&shape_name)?;
+        if dimensions.len() != 2 || dimensions.iter().any(|value| *value <= 0) {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!(
+                    "weight_shape payload must contain two positive values, got {dimensions:?}"
+                ),
+            });
+        }
+        let out_features =
+            usize::try_from(dimensions[0]).map_err(|_| Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!("output dimension overflows usize: {}", dimensions[0]),
+            })?;
+        let in_features =
+            usize::try_from(dimensions[1]).map_err(|_| Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!("input dimension overflows usize: {}", dimensions[1]),
+            })?;
+        let payload_layout = PackedLinearLayout::new(out_features, in_features, 32);
+        if payload_layout != *expected_layout {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!(
+                    "weight_shape payload {:?} does not match expected {:?}",
+                    payload_layout, expected_layout
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_linear_shape_payload(
+        &self,
+        base: &str,
+        bf16_shape: &[usize],
+    ) -> Result<(), Qwen35LoaderError> {
+        if self.manifest.tensor(&format!("{base}.weight")).is_some() {
+            return Ok(());
+        }
+        let expected_layout = PackedLinearLayout::new(bf16_shape[0], bf16_shape[1], 32);
+        self.validate_packed_projection_shape_payload(base, &expected_layout)
+    }
+
+    fn validate_linear_metadata(
+        &self,
+        base: &str,
+        bf16_shape: &[usize],
+    ) -> Result<(), Qwen35LoaderError> {
+        let bf16_name = format!("{base}.weight");
+        if self.manifest.tensor(&bf16_name).is_some() {
+            self.bf16_tensor_manifest(&bf16_name, bf16_shape)?;
+            if [
+                "weight_shape",
+                "weight_packed",
+                "weight_scale",
+                "weight_zero_point",
+            ]
+            .iter()
+            .any(|suffix| self.manifest.tensor(&format!("{base}.{suffix}")).is_some())
+            {
+                return Err(Qwen35LoaderError::ProjectionShape {
+                    base: base.to_owned(),
+                    details: "projection cannot contain both BF16 and packed W4 payloads".into(),
+                });
+            }
+            return Ok(());
+        }
+        let layout = PackedLinearLayout::new(bf16_shape[0], bf16_shape[1], 32);
+        self.validate_packed_projection_metadata(base, &layout)
+    }
+
+    fn read_checked_packed_payload(
+        &self,
+        base: &str,
+        expected_layout: &PackedLinearLayout,
+    ) -> Result<PackedLinearPayload, Qwen35LoaderError> {
+        let payload = self.read_packed_linear_payload(base)?;
+        if payload.layout != *expected_layout {
+            return Err(Qwen35LoaderError::ProjectionShape {
+                base: base.to_owned(),
+                details: format!(
+                    "weight_shape payload {:?} does not match expected {:?}",
+                    payload.layout, expected_layout
+                ),
+            });
+        }
+        Ok(payload)
+    }
+
+    fn read_linear_payload(
+        &self,
+        base: &str,
+        bf16_shape: &[usize],
+    ) -> Result<LinearPayload, Qwen35LoaderError> {
+        let bf16_name = format!("{base}.weight");
+        if self.manifest.tensor(&bf16_name).is_some() {
+            return self
+                .read_bf16_tensor_payload(&bf16_name, bf16_shape)
+                .map(LinearPayload::Bf16);
+        }
+        let expected = PackedLinearLayout::new(bf16_shape[0], bf16_shape[1], 32);
+        self.read_checked_packed_payload(base, &expected)
+            .map(LinearPayload::Packed)
     }
 
     fn read_tensor_i64(&self, name: &str) -> Result<Vec<i64>, Qwen35LoaderError> {
@@ -814,6 +1159,146 @@ mod tests {
     }
 
     #[test]
+    fn gdn_metadata_validation_rejects_wrong_bf16_shape_before_payload_access() {
+        let mut tensors = gdn_metadata_tensors(0);
+        let conv = tensors
+            .iter_mut()
+            .find(|tensor| tensor.name.ends_with("linear_attn.conv1d.weight"))
+            .unwrap();
+        conv.shape = vec![10_240, 4];
+        let manifest = LoaderManifest {
+            schema: LOADER_MANIFEST_SCHEMA.into(),
+            revision: QWEN35_MODEL_REVISION.into(),
+            vocab_size: MODEL_VOCAB_SIZE,
+            tensors,
+        };
+        let inventory = Qwen35CheckpointInventory::from_manifest(&config(), manifest).unwrap();
+        assert!(matches!(
+            inventory.read_gdn_layer_payload(0),
+            Err(Qwen35LoaderError::TensorShape { name, .. })
+                if name.ends_with("linear_attn.conv1d.weight")
+        ));
+    }
+
+    #[test]
+    fn gdn_preflight_rejects_packed_weight_shape_payload_before_other_payload_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("config.json"), config()).unwrap();
+        let shard_name = "model-00001-of-00001.safetensors";
+        let shape_payload = [10_240i64.to_le_bytes(), 5_121i64.to_le_bytes()].concat();
+        let manifests = gdn_metadata_tensors(0);
+        let tensors = manifests
+            .iter()
+            .map(|tensor| {
+                let dtype = match &tensor.dtype {
+                    ManifestDType::BF16 => "BF16",
+                    ManifestDType::I32 => "I32",
+                    ManifestDType::Other(value) if value == "I64" => "I64",
+                    dtype => panic!("unexpected test dtype: {dtype:?}"),
+                };
+                let payload = if tensor.name.ends_with("in_proj_qkv.weight_shape") {
+                    shape_payload.as_slice()
+                } else {
+                    &[]
+                };
+                (
+                    tensor.name.clone(),
+                    dtype,
+                    tensor.shape.clone(),
+                    payload.to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let tensor_refs = tensors
+            .iter()
+            .map(|(name, dtype, shape, payload)| {
+                (name.as_str(), *dtype, shape.as_slice(), payload.as_slice())
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(
+            directory.path().join(shard_name),
+            tiny_safetensors_multi(&tensor_refs),
+        )
+        .unwrap();
+        let weight_map = tensor_refs
+            .iter()
+            .map(|(name, _, _, _)| format!(r#""{name}":"{shard_name}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(
+            directory.path().join("model.safetensors.index.json"),
+            format!(r#"{{"weight_map":{{{weight_map}}}}}"#),
+        )
+        .unwrap();
+
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(directory.path(), QWEN35_MODEL_REVISION)
+                .unwrap();
+        let error = inventory.read_gdn_layer_payload(0).unwrap_err();
+        assert!(matches!(
+            error,
+            Qwen35LoaderError::ProjectionShape { base, details }
+                if base.ends_with("linear_attn.in_proj_qkv")
+                    && details.contains("weight_shape payload")
+        ));
+    }
+
+    #[test]
+    fn gdn_metadata_accepts_layer_zero_mixed_w4_and_bf16_contract() {
+        let manifest = LoaderManifest {
+            schema: LOADER_MANIFEST_SCHEMA.into(),
+            revision: QWEN35_MODEL_REVISION.into(),
+            vocab_size: MODEL_VOCAB_SIZE,
+            tensors: gdn_metadata_tensors(0),
+        };
+        let inventory = Qwen35CheckpointInventory::from_manifest(&config(), manifest).unwrap();
+        assert!(matches!(
+            inventory.read_gdn_layer_payload(0),
+            Err(Qwen35LoaderError::Io(message)) if message.contains("payload directory")
+        ));
+    }
+
+    #[test]
+    fn gdn_metadata_accepts_later_layer_w4_output_projection_contract() {
+        let manifest = LoaderManifest {
+            schema: LOADER_MANIFEST_SCHEMA.into(),
+            revision: QWEN35_MODEL_REVISION.into(),
+            vocab_size: MODEL_VOCAB_SIZE,
+            tensors: gdn_metadata_tensors(1),
+        };
+        let inventory = Qwen35CheckpointInventory::from_manifest(&config(), manifest).unwrap();
+        assert!(matches!(
+            inventory.read_gdn_layer_payload(1),
+            Err(Qwen35LoaderError::Io(message)) if message.contains("payload directory")
+        ));
+    }
+
+    #[test]
+    fn gdn_metadata_uses_configured_convolution_kernel_dim() {
+        let custom_config = config().replace(
+            "\"linear_conv_kernel_dim\": 4",
+            "\"linear_conv_kernel_dim\": 5",
+        );
+        let mut tensors = gdn_metadata_tensors(0);
+        let conv = tensors
+            .iter_mut()
+            .find(|tensor| tensor.name.ends_with("linear_attn.conv1d.weight"))
+            .unwrap();
+        conv.shape = vec![10_240, 1, 5];
+        let manifest = LoaderManifest {
+            schema: LOADER_MANIFEST_SCHEMA.into(),
+            revision: QWEN35_MODEL_REVISION.into(),
+            vocab_size: MODEL_VOCAB_SIZE,
+            tensors,
+        };
+        let inventory = Qwen35CheckpointInventory::from_manifest(&custom_config, manifest).unwrap();
+        assert!(matches!(
+            inventory.read_gdn_layer_payload(0),
+            Err(Qwen35LoaderError::Io(message)) if message.contains("payload directory")
+        ));
+    }
+
+    #[test]
     fn i64_is_allowed_only_for_weight_shape_metadata() {
         let mut manifest = LoaderManifest {
             schema: LOADER_MANIFEST_SCHEMA.into(),
@@ -908,5 +1393,130 @@ mod tests {
             bytes.extend_from_slice(payload);
         }
         bytes
+    }
+
+    fn gdn_metadata_tensors(layer_index: usize) -> Vec<TensorManifest> {
+        let prefix = format!("model.language_model.layers.{layer_index}");
+        let mut tensors = Vec::new();
+        fn push_bf16(tensors: &mut Vec<TensorManifest>, name: String, shape: Vec<usize>) {
+            tensors.push(TensorManifest {
+                name,
+                shape,
+                dtype: ManifestDType::BF16,
+                quantization_role: None,
+                pack_axis: None,
+                group_size: None,
+            });
+        }
+        fn push_packed(tensors: &mut Vec<TensorManifest>, base: String, shape: [usize; 2]) {
+            let (out, input) = (shape[0], shape[1]);
+            tensors.push(TensorManifest {
+                name: format!("{base}.weight_shape"),
+                shape: vec![2],
+                dtype: ManifestDType::Other("I64".into()),
+                quantization_role: None,
+                pack_axis: None,
+                group_size: None,
+            });
+            tensors.push(TensorManifest {
+                name: format!("{base}.weight_packed"),
+                shape: vec![out, input.div_ceil(8)],
+                dtype: ManifestDType::I32,
+                quantization_role: None,
+                pack_axis: None,
+                group_size: None,
+            });
+            tensors.push(TensorManifest {
+                name: format!("{base}.weight_scale"),
+                shape: vec![out, input.div_ceil(32)],
+                dtype: ManifestDType::BF16,
+                quantization_role: None,
+                pack_axis: None,
+                group_size: None,
+            });
+            tensors.push(TensorManifest {
+                name: format!("{base}.weight_zero_point"),
+                shape: vec![out.div_ceil(8), input.div_ceil(32)],
+                dtype: ManifestDType::I32,
+                quantization_role: None,
+                pack_axis: None,
+                group_size: None,
+            });
+        }
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.input_layernorm.weight"),
+            vec![5120],
+        );
+        push_packed(
+            &mut tensors,
+            format!("{prefix}.linear_attn.in_proj_qkv"),
+            [10240, 5120],
+        );
+        push_packed(
+            &mut tensors,
+            format!("{prefix}.linear_attn.in_proj_z"),
+            [6144, 5120],
+        );
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.linear_attn.in_proj_a.weight"),
+            vec![48, 5120],
+        );
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.linear_attn.in_proj_b.weight"),
+            vec![48, 5120],
+        );
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.linear_attn.conv1d.weight"),
+            vec![10240, 1, 4],
+        );
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.linear_attn.A_log"),
+            vec![48],
+        );
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.linear_attn.dt_bias"),
+            vec![48],
+        );
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.linear_attn.norm.weight"),
+            vec![128],
+        );
+        if layer_index == 0 {
+            push_bf16(
+                &mut tensors,
+                format!("{prefix}.linear_attn.out_proj.weight"),
+                vec![5120, 6144],
+            );
+        } else {
+            push_packed(
+                &mut tensors,
+                format!("{prefix}.linear_attn.out_proj"),
+                [5120, 6144],
+            );
+        }
+        push_bf16(
+            &mut tensors,
+            format!("{prefix}.post_attention_layernorm.weight"),
+            vec![5120],
+        );
+        push_packed(
+            &mut tensors,
+            format!("{prefix}.mlp.gate_proj"),
+            [17408, 5120],
+        );
+        push_packed(&mut tensors, format!("{prefix}.mlp.up_proj"), [17408, 5120]);
+        push_packed(
+            &mut tensors,
+            format!("{prefix}.mlp.down_proj"),
+            [5120, 17408],
+        );
+        tensors
     }
 }

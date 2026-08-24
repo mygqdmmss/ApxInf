@@ -13,6 +13,9 @@ use apxinf_model::{RuntimeCapabilities, RuntimeError, RuntimeRequest};
 
 use super::service::{ProtocolRuntime, TokenStream};
 
+#[cfg(any(feature = "cuda", feature = "cuda-no-nvtx"))]
+use apxinf_model::qwen35::{Qwen35CudaModel, Qwen35CudaSession};
+
 pub trait Qwen35StepSession: Send {
     /// Advance the request by at most one generated token.
     fn next_token(&mut self) -> Result<Option<u32>, RuntimeError>;
@@ -21,6 +24,42 @@ pub trait Qwen35StepSession: Send {
 pub trait Qwen35StepExecutor: Send + Sync + 'static {
     /// Create request-local CUDA state after admission has succeeded.
     fn open(&self, request: RuntimeRequest) -> Result<Box<dyn Qwen35StepSession>, RuntimeError>;
+}
+
+#[cfg(any(feature = "cuda", feature = "cuda-no-nvtx"))]
+pub struct Qwen35CudaStepExecutor {
+    model: std::sync::Arc<Qwen35CudaModel>,
+}
+
+#[cfg(any(feature = "cuda", feature = "cuda-no-nvtx"))]
+impl Qwen35CudaStepExecutor {
+    pub fn new(model: std::sync::Arc<Qwen35CudaModel>) -> Self {
+        Self { model }
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "cuda-no-nvtx"))]
+struct Qwen35CudaStepSession {
+    session: Qwen35CudaSession,
+}
+
+#[cfg(any(feature = "cuda", feature = "cuda-no-nvtx"))]
+impl Qwen35StepSession for Qwen35CudaStepSession {
+    fn next_token(&mut self) -> Result<Option<u32>, RuntimeError> {
+        self.session.next_token().map_err(RuntimeError::Execution)
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "cuda-no-nvtx"))]
+impl Qwen35StepExecutor for Qwen35CudaStepExecutor {
+    fn open(&self, request: RuntimeRequest) -> Result<Box<dyn Qwen35StepSession>, RuntimeError> {
+        self.model
+            .open(&request.input_ids, request.max_new_tokens)
+            .map(|session| {
+                Box::new(Qwen35CudaStepSession { session }) as Box<dyn Qwen35StepSession>
+            })
+            .map_err(RuntimeError::Execution)
+    }
 }
 
 enum SessionCommand {
@@ -105,6 +144,15 @@ impl ProtocolRuntime for Qwen35ProtocolRuntime {
             request_cancel: cancel,
             finished: AtomicBool::new(false),
         }))
+    }
+
+    fn warmup(&self) -> Result<(), RuntimeError> {
+        let mut stream = self.start(RuntimeRequest::new(vec![1], 2))?;
+        stream.next_token()?;
+        stream
+            .next_token()?
+            .map(|_| ())
+            .ok_or_else(|| RuntimeError::Execution("warmup produced no decode token".into()))
     }
 }
 
@@ -356,5 +404,19 @@ mod tests {
             runtime.start(RuntimeRequest::new(vec![1], 1)),
             Err(RuntimeError::Capacity)
         ));
+    }
+
+    #[test]
+    fn warmup_runs_through_the_serial_worker() {
+        let runtime_instance = runtime(vec![Ok(vec![Ok(7), Ok(8)])]);
+        assert_eq!(runtime_instance.warmup(), Ok(()));
+
+        let runtime_instance = runtime(vec![Ok(vec![Err(RuntimeError::Execution(
+            "warmup boom".into(),
+        ))])]);
+        assert_eq!(
+            runtime_instance.warmup(),
+            Err(RuntimeError::Execution("warmup boom".into()))
+        );
     }
 }

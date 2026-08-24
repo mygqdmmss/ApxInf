@@ -118,13 +118,13 @@ impl Qwen35W4DeviceProjection {
                 scales_cpu.device()
             )));
         }
-        let weight_buffer = CudaBuffer::alloc(expected_weight_bytes, ctx.device_id())
-            .map_err(Error::Cuda)?;
+        let weight_buffer =
+            CudaBuffer::alloc(expected_weight_bytes, ctx.device_id()).map_err(Error::Cuda)?;
         weight_buffer
             .copy_from_host(weight_packed)
             .map_err(Error::Cuda)?;
-        let zero_point_buffer = CudaBuffer::alloc(expected_zero_point_bytes, ctx.device_id())
-            .map_err(Error::Cuda)?;
+        let zero_point_buffer =
+            CudaBuffer::alloc(expected_zero_point_bytes, ctx.device_id()).map_err(Error::Cuda)?;
         zero_point_buffer
             .copy_from_host(zero_points)
             .map_err(Error::Cuda)?;

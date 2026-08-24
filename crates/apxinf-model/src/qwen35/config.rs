@@ -34,6 +34,7 @@ pub struct Qwen35ModelConfig {
     pub linear_key_heads: usize,
     pub linear_value_heads: usize,
     pub linear_head_dim: usize,
+    pub linear_conv_kernel_dim: usize,
     pub full_attention_heads: usize,
     pub full_attention_kv_heads: usize,
     pub full_attention_head_dim: usize,
@@ -46,7 +47,8 @@ pub struct Qwen35ModelConfig {
 
 impl Qwen35ModelConfig {
     pub fn from_json_file(path: impl AsRef<std::path::Path>) -> Result<Self, Qwen35ConfigError> {
-        let raw = std::fs::read_to_string(path).map_err(|e| Qwen35ConfigError::InvalidValue(e.to_string()))?;
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| Qwen35ConfigError::InvalidValue(e.to_string()))?;
         Self::from_json_str(&raw)
     }
 
@@ -97,15 +99,22 @@ impl Qwen35ModelConfig {
             layer_types.push(match value {
                 "linear_attention" => LayerType::Gdn,
                 "full_attention" => LayerType::FullAttention,
-                _ => return Err(Qwen35ConfigError::InvalidValue(format!("layer_types={value}"))),
+                _ => {
+                    return Err(Qwen35ConfigError::InvalidValue(format!(
+                        "layer_types={value}"
+                    )))
+                }
             });
         }
         let linear_key_heads = required_usize(text, "linear_num_key_heads")?;
         let linear_value_heads = required_usize(text, "linear_num_value_heads")?;
         let linear_key_dim = required_usize(text, "linear_key_head_dim")?;
         let linear_value_dim = required_usize(text, "linear_value_head_dim")?;
+        let linear_conv_kernel_dim = required_usize(text, "linear_conv_kernel_dim")?;
         if linear_key_dim != linear_value_dim {
-            return Err(Qwen35ConfigError::InvalidValue("linear head dimensions".into()));
+            return Err(Qwen35ConfigError::InvalidValue(
+                "linear head dimensions".into(),
+            ));
         }
         let full_attention_heads = required_usize(text, "num_attention_heads")?;
         let full_attention_kv_heads = required_usize(text, "num_key_value_heads")?;
@@ -119,11 +128,14 @@ impl Qwen35ModelConfig {
             || eos_token_id != EOS_TOKEN_IDS[1] as u64
             || hidden_size == 0
             || num_hidden_layers == 0
+            || linear_conv_kernel_dim == 0
         {
             return Err(Qwen35ConfigError::InvalidValue("model contract".into()));
         }
         if partial_rotary_factor <= 0.0 || partial_rotary_factor > 1.0 {
-            return Err(Qwen35ConfigError::InvalidValue("partial_rotary_factor".into()));
+            return Err(Qwen35ConfigError::InvalidValue(
+                "partial_rotary_factor".into(),
+            ));
         }
         Ok(Self {
             vocab_size,
@@ -135,6 +147,7 @@ impl Qwen35ModelConfig {
             linear_key_heads,
             linear_value_heads,
             linear_head_dim: linear_key_dim,
+            linear_conv_kernel_dim,
             full_attention_heads,
             full_attention_kv_heads,
             full_attention_head_dim,
@@ -147,11 +160,17 @@ impl Qwen35ModelConfig {
     }
 
     pub fn gdn_layer_count(&self) -> usize {
-        self.layer_types.iter().filter(|t| **t == LayerType::Gdn).count()
+        self.layer_types
+            .iter()
+            .filter(|t| **t == LayerType::Gdn)
+            .count()
     }
 
     pub fn full_attention_layer_count(&self) -> usize {
-        self.layer_types.iter().filter(|t| **t == LayerType::FullAttention).count()
+        self.layer_types
+            .iter()
+            .filter(|t| **t == LayerType::FullAttention)
+            .count()
     }
 
     pub fn partial_rotary_dim(&self) -> usize {
@@ -159,36 +178,56 @@ impl Qwen35ModelConfig {
     }
 }
 
-fn required<'a>(root: &'a serde_json::Value, name: &str) -> Result<&'a serde_json::Value, Qwen35ConfigError> {
-    root.get(name).ok_or_else(|| Qwen35ConfigError::MissingField(name.into()))
+fn required<'a>(
+    root: &'a serde_json::Value,
+    name: &str,
+) -> Result<&'a serde_json::Value, Qwen35ConfigError> {
+    root.get(name)
+        .ok_or_else(|| Qwen35ConfigError::MissingField(name.into()))
 }
 fn required_str<'a>(root: &'a serde_json::Value, name: &str) -> Result<&'a str, Qwen35ConfigError> {
-    required(root, name)?.as_str().ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
+    required(root, name)?
+        .as_str()
+        .ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
 }
 fn required_u64(root: &serde_json::Value, name: &str) -> Result<u64, Qwen35ConfigError> {
-    required(root, name)?.as_u64().ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
+    required(root, name)?
+        .as_u64()
+        .ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
 }
 fn required_usize(root: &serde_json::Value, name: &str) -> Result<usize, Qwen35ConfigError> {
-    usize::try_from(required_u64(root, name)?).map_err(|_| Qwen35ConfigError::InvalidValue(name.into()))
+    usize::try_from(required_u64(root, name)?)
+        .map_err(|_| Qwen35ConfigError::InvalidValue(name.into()))
 }
 fn required_f32(root: &serde_json::Value, name: &str) -> Result<f32, Qwen35ConfigError> {
-    required(root, name)?.as_f64().map(|v| v as f32).ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
+    required(root, name)?
+        .as_f64()
+        .map(|v| v as f32)
+        .ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
 }
 fn required_bool(root: &serde_json::Value, name: &str) -> Result<bool, Qwen35ConfigError> {
-    required(root, name)?.as_bool().ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
+    required(root, name)?
+        .as_bool()
+        .ok_or_else(|| Qwen35ConfigError::InvalidType(name.into()))
 }
 
 fn validate_quantization_config(root: &serde_json::Value) -> Result<(), Qwen35ConfigError> {
     let quant = required(root, "quantization_config")?;
     let format = required_str(quant, "format")?;
     if format != "pack-quantized" {
-        return Err(Qwen35ConfigError::InvalidValue("quantization_config.format".into()));
+        return Err(Qwen35ConfigError::InvalidValue(
+            "quantization_config.format".into(),
+        ));
     }
     let group = required(quant, "config_groups")?
         .get("group_0")
-        .ok_or_else(|| Qwen35ConfigError::MissingField("quantization_config.config_groups.group_0".into()))?;
+        .ok_or_else(|| {
+            Qwen35ConfigError::MissingField("quantization_config.config_groups.group_0".into())
+        })?;
     if required_str(group, "format")? != "pack-quantized" {
-        return Err(Qwen35ConfigError::InvalidValue("quantization_config.group_0.format".into()));
+        return Err(Qwen35ConfigError::InvalidValue(
+            "quantization_config.group_0.format".into(),
+        ));
     }
     let weight = required(group, "weights")?;
     if required_usize(weight, "group_size")? != 32
@@ -197,7 +236,9 @@ fn validate_quantization_config(root: &serde_json::Value) -> Result<(), Qwen35Co
         || required_str(weight, "strategy")? != "group"
         || required_str(weight, "type")? != "int"
     {
-        return Err(Qwen35ConfigError::InvalidValue("quantization_config.weights".into()));
+        return Err(Qwen35ConfigError::InvalidValue(
+            "quantization_config.weights".into(),
+        ));
     }
     Ok(())
 }
@@ -248,6 +289,7 @@ mod tests {
         assert_eq!(config.linear_key_heads, 16);
         assert_eq!(config.linear_value_heads, 48);
         assert_eq!(config.linear_head_dim, 128);
+        assert_eq!(config.linear_conv_kernel_dim, 4);
         assert_eq!(config.partial_rotary_dim(), 64);
         assert!(config.attn_output_gate);
         assert_eq!(config.eos_token_ids, [248_046, 248_044]);

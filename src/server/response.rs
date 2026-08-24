@@ -87,6 +87,7 @@ pub fn sse_error_frame(request_id: &str, error: &apxinf_model::RuntimeError) -> 
         apxinf_model::RuntimeError::Capacity | apxinf_model::RuntimeError::QueueFull => "capacity",
         apxinf_model::RuntimeError::Admission(_) => "invalid_request",
         apxinf_model::RuntimeError::Cancelled => "cancelled",
+        apxinf_model::RuntimeError::Unhealthy => "unhealthy",
         _ => "runtime_error",
     };
     let body = serde_json::to_string(&json!({

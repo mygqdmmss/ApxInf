@@ -64,6 +64,8 @@ pub enum RuntimeError {
     Cancelled,
     #[error("runtime worker stopped")]
     WorkerStopped,
+    #[error("runtime service is unhealthy")]
+    Unhealthy,
     #[error("runtime execution failed: {0}")]
     Execution(String),
 }

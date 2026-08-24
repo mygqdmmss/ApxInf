@@ -32,12 +32,7 @@ pub fn handle_connection<S: ProtocolRuntime>(
 ) -> std::io::Result<()> {
     let request = read_request(&mut stream)?;
     if request.method == "GET" && request.path == "/health" {
-        let response = HttpResponse {
-            status: 200,
-            content_type: "application/json",
-            body: service.health_json(),
-        };
-        return write_response(&mut stream, response);
+        return write_response(&mut stream, service.health_response());
     }
     if request.method != "POST" || request.path != GENERATE_PATH {
         return write_response(
@@ -225,6 +220,7 @@ mod tests {
         token_count: usize,
         max_model_len: usize,
         yielded: Arc<AtomicUsize>,
+        warmup_fails: bool,
     }
 
     struct FakeStream {
@@ -260,6 +256,14 @@ mod tests {
                 yielded: Arc::clone(&self.yielded),
             }))
         }
+
+        fn warmup(&self) -> Result<(), RuntimeError> {
+            if self.warmup_fails {
+                Err(RuntimeError::Execution("warmup failed".into()))
+            } else {
+                Ok(())
+            }
+        }
     }
 
     fn request(method: &str, path: &str, body: &[u8]) -> Vec<u8> {
@@ -280,6 +284,7 @@ mod tests {
                 token_count: 2,
                 max_model_len: 32,
                 yielded: Arc::new(AtomicUsize::new(0)),
+                warmup_fails: false,
             },
             true,
         ));
@@ -302,6 +307,36 @@ mod tests {
         assert!(String::from_utf8_lossy(&health).contains("\"status\":\"ok\""));
         let missing = exchange(request("GET", "/missing", b""));
         assert!(missing.starts_with(b"HTTP/1.1 404 Not Found\r\n"));
+    }
+
+    #[test]
+    fn unhealthy_service_returns_http_503_from_health() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let service = Arc::new(crate::server::service::ProtocolService::new(
+            FakeRuntime {
+                cancelled: Arc::new(Mutex::new(false)),
+                token_count: 0,
+                max_model_len: 32,
+                yielded: Arc::new(AtomicUsize::new(0)),
+                warmup_fails: true,
+            },
+            false,
+        ));
+        service.mark_unhealthy();
+        let server_service = Arc::clone(&service);
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            handle_connection(stream, &server_service).unwrap();
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client.write_all(&request("GET", "/health", b"")).unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 503 Service Unavailable\r\n"));
+        assert!(String::from_utf8_lossy(&response).contains("\"status\":\"unhealthy\""));
     }
 
     #[test]
@@ -342,6 +377,7 @@ mod tests {
                 token_count: 20_000,
                 max_model_len: 20_008,
                 yielded: Arc::clone(&yielded),
+                warmup_fails: false,
             },
             true,
         ));

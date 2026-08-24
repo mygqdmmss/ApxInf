@@ -21,6 +21,13 @@ pub trait TokenStream: Send {
 pub trait ProtocolRuntime: Send + Sync {
     fn capabilities(&self) -> RuntimeCapabilities;
     fn start(&self, request: RuntimeRequest) -> Result<Box<dyn TokenStream>, RuntimeError>;
+
+    /// Execute a small request through the production execution path. The
+    /// default keeps model-neutral fixtures usable; real runtimes override it
+    /// so readiness proves the worker and device can actually execute.
+    fn warmup(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -107,6 +114,7 @@ enum SsePhase {
 pub struct SseGeneration {
     generation: ActiveGeneration,
     phase: SsePhase,
+    readiness: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SseGeneration {
@@ -120,6 +128,9 @@ impl SseGeneration {
                 let next = match self.generation.next_output_token() {
                     Ok(next) => next,
                     Err(error) => {
+                        if is_fatal_runtime_error(&error) {
+                            self.readiness.store(false, Ordering::Release);
+                        }
                         self.phase = SsePhase::Complete;
                         return Err(error);
                     }
@@ -154,10 +165,20 @@ pub struct ProtocolService<R> {
     next_request_id: AtomicU64,
     capabilities: RuntimeCapabilities,
     stub: bool,
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    recovery_lock: std::sync::Mutex<()>,
 }
 
 impl<R: ProtocolRuntime> ProtocolService<R> {
     pub fn new(runtime: R, stub: bool) -> Self {
+        Self::with_readiness(runtime, stub, true)
+    }
+
+    pub fn new_unready(runtime: R, stub: bool) -> Self {
+        Self::with_readiness(runtime, stub, false)
+    }
+
+    fn with_readiness(runtime: R, stub: bool, ready: bool) -> Self {
         let capabilities = runtime.capabilities();
         assert_eq!(
             capabilities.vocab_size, MODEL_VOCAB_SIZE as usize,
@@ -168,12 +189,19 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
             next_request_id: AtomicU64::new(1),
             capabilities,
             stub,
+            ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(ready)),
+            recovery_lock: std::sync::Mutex::new(()),
         }
     }
 
     pub fn health_json(&self) -> Vec<u8> {
+        self.health_json_inner()
+    }
+
+    fn health_json_inner(&self) -> Vec<u8> {
+        let ready = self.ready.load(Ordering::Acquire);
         serde_json::to_vec(&json!({
-            "status": "ok",
+            "status": if ready { "ok" } else { "unhealthy" },
             "evaluation_contract": EVALUATION_CONTRACT,
             "model_revision": MODEL_REVISION,
             "vocab_size": MODEL_VOCAB_SIZE,
@@ -190,6 +218,53 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
         .expect("JSON serialization is infallible")
     }
 
+    /// Return the health response, attempting one serialized worker warmup if
+    /// the previous request left the service unhealthy.
+    pub fn health_response(&self) -> HttpResponse {
+        if !self.ready.load(Ordering::Acquire) {
+            let _guard = self.recovery_lock.lock().ok();
+            if !self.ready.load(Ordering::Acquire) {
+                let _ = self.warmup_inner();
+            }
+        }
+        let ready = self.ready.load(Ordering::Acquire);
+        HttpResponse {
+            status: if ready { 200 } else { 503 },
+            content_type: "application/json",
+            body: self.health_json_inner(),
+        }
+    }
+
+    pub fn warmup(&self) -> Result<(), RuntimeError> {
+        let _guard = self
+            .recovery_lock
+            .lock()
+            .map_err(|_| RuntimeError::WorkerStopped)?;
+        self.warmup_inner()
+    }
+
+    fn warmup_inner(&self) -> Result<(), RuntimeError> {
+        self.ready.store(false, Ordering::Release);
+        match self.runtime.warmup() {
+            Ok(()) => {
+                self.ready.store(true, Ordering::Release);
+                Ok(())
+            }
+            Err(error) => {
+                self.ready.store(false, Ordering::Release);
+                Err(error)
+            }
+        }
+    }
+
+    pub fn mark_unhealthy(&self) {
+        self.ready.store(false, Ordering::Release);
+    }
+
+    pub fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Release);
+    }
+
     pub fn handle_non_stream(&self, raw: &[u8]) -> HttpResponse {
         let request = match parse_generate_request(raw, self.capabilities.max_model_len) {
             Ok(request) => request,
@@ -202,13 +277,19 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
         }
         let mut generation = match self.start(request) {
             Ok(generation) => generation,
-            Err(error) => return runtime_response(error),
+            Err(error) => {
+                self.note_runtime_error(&error);
+                return runtime_response(error);
+            }
         };
         loop {
             match generation.next_output_token() {
                 Ok(Some(_)) => {}
                 Ok(None) => break,
-                Err(error) => return runtime_response(error),
+                Err(error) => {
+                    self.note_runtime_error(&error);
+                    return runtime_response(error);
+                }
             }
         }
         HttpResponse {
@@ -230,14 +311,21 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
                 "stream=false requires the non-streaming response path",
             )));
         }
-        let generation = self.start(request).map_err(runtime_response)?;
+        let generation = self.start(request).map_err(|error| {
+            self.note_runtime_error(&error);
+            runtime_response(error)
+        })?;
         Ok(SseGeneration {
             generation,
             phase: SsePhase::Tokens,
+            readiness: std::sync::Arc::clone(&self.ready),
         })
     }
 
     fn start(&self, request: GenerateRequest) -> Result<ActiveGeneration, RuntimeError> {
+        if !self.ready.load(Ordering::Acquire) {
+            return Err(RuntimeError::Unhealthy);
+        }
         let runtime_request =
             RuntimeRequest::new(request.input_ids.clone(), request.max_new_tokens);
         let request_cancel = runtime_request.cancel.clone();
@@ -252,6 +340,12 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
             stream,
             finished: false,
         })
+    }
+
+    fn note_runtime_error(&self, error: &RuntimeError) {
+        if is_fatal_runtime_error(error) {
+            self.mark_unhealthy();
+        }
     }
 
     fn next_id(&self) -> String {
@@ -276,6 +370,7 @@ pub(crate) fn runtime_response(error: RuntimeError) -> HttpResponse {
         RuntimeError::QueueFull => (503, "capacity"),
         RuntimeError::Admission(_) => (400, "invalid_request"),
         RuntimeError::Cancelled => (499, "cancelled"),
+        RuntimeError::Unhealthy => (503, "unhealthy"),
         _ => (500, "runtime_error"),
     };
     let protocol_error = ProtocolError {
@@ -287,6 +382,13 @@ pub(crate) fn runtime_response(error: RuntimeError) -> HttpResponse {
         content_type: "application/json",
         body: error_json(&protocol_error),
     }
+}
+
+fn is_fatal_runtime_error(error: &RuntimeError) -> bool {
+    matches!(
+        error,
+        RuntimeError::Execution(_) | RuntimeError::WorkerStopped
+    )
 }
 
 #[cfg(test)]
@@ -465,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_error_does_not_poison_next_eight_token_request() {
+    fn execution_error_rejects_requests_until_health_warmup_recovers() {
         let service = ProtocolService::new(
             FakeRuntime::new(vec![
                 StartResult::TokensThenError(vec![], RuntimeError::Execution("boom".into())),
@@ -474,7 +576,34 @@ mod tests {
             true,
         );
         assert_eq!(service.handle_non_stream(&body(true, false)).status, 500);
+        assert_eq!(service.handle_non_stream(&body(true, false)).status, 503);
+        assert_eq!(service.health_response().status, 200);
         assert_eq!(service.handle_non_stream(&body(true, false)).status, 200);
+    }
+
+    #[test]
+    fn execution_error_marks_health_unhealthy_until_warmup_recovers() {
+        let service = ProtocolService::new(
+            FakeRuntime::new(vec![
+                StartResult::TokensThenError(vec![], RuntimeError::Execution("boom".into())),
+                StartResult::Tokens(vec![7]),
+            ]),
+            false,
+        );
+
+        assert_eq!(service.handle_non_stream(&body(true, false)).status, 500);
+        service.mark_unhealthy();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&service.health_json()).unwrap()["status"],
+            "unhealthy"
+        );
+        let unhealthy: Value = serde_json::from_slice(&service.health_json()).unwrap();
+        assert_eq!(unhealthy["status"], "unhealthy");
+
+        service.mark_ready();
+        assert_eq!(service.health_response().status, 200);
+        let healthy: Value = serde_json::from_slice(&service.health_json()).unwrap();
+        assert_eq!(healthy["status"], "ok");
     }
 
     #[test]

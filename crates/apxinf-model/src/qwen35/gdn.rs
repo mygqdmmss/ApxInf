@@ -196,6 +196,77 @@ impl GdnState {
         Ok(output)
     }
 
+    /// Apply the Qwen3.5 recurrent gated-delta update. The query and key
+    /// slices are already expanded to one head per value head. State remains
+    /// FP32 even when the surrounding activations are BF16.
+    pub fn gated_delta_step(
+        &mut self,
+        query: &[f32],
+        key: &[f32],
+        value: &[f32],
+        decay: &[f32],
+        beta: &[f32],
+    ) -> Result<Vec<f32>, GdnError> {
+        let d = self.dimensions;
+        if query.len() != d.value_heads * d.key_dim
+            || key.len() != query.len()
+            || value.len() != d.value_heads * d.value_dim
+            || decay.len() != d.value_heads
+            || beta.len() != d.value_heads
+        {
+            return Err(GdnError::Shape {
+                name: "gated delta step",
+            });
+        }
+        for (name, values) in [
+            ("query", query),
+            ("key", key),
+            ("value", value),
+            ("decay", decay),
+            ("beta", beta),
+        ] {
+            require_finite(name, values)?;
+        }
+        let query = l2_normalize_heads(query, d.value_heads, d.key_dim)?;
+        let key = l2_normalize_heads(key, d.value_heads, d.key_dim)?;
+        let query_scale = (d.key_dim as f32).sqrt().recip();
+        let mut next = self.recurrent.clone();
+        let mut output = vec![0.0; d.value_heads * d.value_dim];
+        for head in 0..d.value_heads {
+            let state_base = head * d.key_dim * d.value_dim;
+            let q_base = head * d.key_dim;
+            let value_base = head * d.value_dim;
+            let decay_factor = decay[head].exp();
+            for element in &mut next[state_base..state_base + d.key_dim * d.value_dim] {
+                *element *= decay_factor;
+            }
+            for value_dimension in 0..d.value_dim {
+                let memory = (0..d.key_dim)
+                    .map(|key_dimension| {
+                        next[state_base + key_dimension * d.value_dim + value_dimension]
+                            * key[q_base + key_dimension]
+                    })
+                    .sum::<f32>();
+                let delta = (value[value_base + value_dimension] - memory) * beta[head];
+                for key_dimension in 0..d.key_dim {
+                    next[state_base + key_dimension * d.value_dim + value_dimension] +=
+                        key[q_base + key_dimension] * delta;
+                }
+                output[value_base + value_dimension] = (0..d.key_dim)
+                    .map(|key_dimension| {
+                        next[state_base + key_dimension * d.value_dim + value_dimension]
+                            * query[q_base + key_dimension]
+                            * query_scale
+                    })
+                    .sum();
+            }
+        }
+        require_finite("recurrent state", &next)?;
+        require_finite("recurrent output", &output)?;
+        self.recurrent = next;
+        Ok(output)
+    }
+
     pub fn eager_prefill(
         &mut self,
         query: &[f32],
@@ -250,6 +321,203 @@ impl GdnState {
     }
 }
 
+/// Small dense matrix used by the CPU reference fixture. Production CUDA
+/// layers retain packed W4 projections and do not expand the checkpoint.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DenseMatrix {
+    rows: usize,
+    cols: usize,
+    values: Vec<f32>,
+}
+
+impl DenseMatrix {
+    pub fn new(rows: usize, cols: usize, values: Vec<f32>) -> Result<Self, GdnError> {
+        if rows == 0 || cols == 0 || values.len() != rows * cols {
+            return Err(GdnError::Shape {
+                name: "dense matrix",
+            });
+        }
+        require_finite("dense matrix", &values)?;
+        Ok(Self { rows, cols, values })
+    }
+
+    pub const fn rows(&self) -> usize {
+        self.rows
+    }
+
+    pub const fn cols(&self) -> usize {
+        self.cols
+    }
+
+    fn apply(&self, input: &[f32]) -> Result<Vec<f32>, GdnError> {
+        if input.len() != self.cols {
+            return Err(GdnError::Shape {
+                name: "dense projection",
+            });
+        }
+        require_finite("dense activation", input)?;
+        let mut output = vec![0.0; self.rows];
+        for (row, result) in output.iter_mut().enumerate() {
+            *result = self.values[row * self.cols..(row + 1) * self.cols]
+                .iter()
+                .zip(input)
+                .map(|(weight, value)| weight * value)
+                .sum();
+        }
+        require_finite("dense projection output", &output)?;
+        Ok(output)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GdnReferenceLayerConfig {
+    pub hidden_size: usize,
+    pub dimensions: GdnDimensions,
+    pub rms_epsilon: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct GdnReferenceWeights {
+    pub in_proj_qkv: DenseMatrix,
+    pub in_proj_z: DenseMatrix,
+    pub in_proj_a: DenseMatrix,
+    pub in_proj_b: DenseMatrix,
+    pub conv_weight: Vec<f32>,
+    pub a_log: Vec<f32>,
+    pub dt_bias: Vec<f32>,
+    pub norm_weight: Vec<f32>,
+    pub out_proj: DenseMatrix,
+}
+
+#[derive(Debug, Clone)]
+pub struct GdnReferenceLayer {
+    config: GdnReferenceLayerConfig,
+    weights: Option<GdnReferenceWeights>,
+}
+
+impl GdnReferenceLayer {
+    pub fn new(config: GdnReferenceLayerConfig) -> Result<Self, GdnError> {
+        if config.hidden_size == 0 || config.rms_epsilon <= 0.0 || !config.rms_epsilon.is_finite() {
+            return Err(GdnError::Dimensions);
+        }
+        Ok(Self {
+            config,
+            weights: None,
+        })
+    }
+
+    pub fn set_weights(&mut self, weights: GdnReferenceWeights) -> Result<(), GdnError> {
+        let d = self.config.dimensions;
+        if weights.in_proj_qkv.rows() != d.conv_channels()
+            || weights.in_proj_qkv.cols() != self.config.hidden_size
+            || weights.in_proj_z.rows() != d.value_heads * d.value_dim
+            || weights.in_proj_z.cols() != self.config.hidden_size
+            || weights.in_proj_a.rows() != d.value_heads
+            || weights.in_proj_a.cols() != self.config.hidden_size
+            || weights.in_proj_b.rows() != d.value_heads
+            || weights.in_proj_b.cols() != self.config.hidden_size
+            || weights.out_proj.rows() != self.config.hidden_size
+            || weights.out_proj.cols() != d.value_heads * d.value_dim
+            || weights.conv_weight.len() != d.conv_channels() * d.conv_kernel
+            || weights.a_log.len() != d.value_heads
+            || weights.dt_bias.len() != d.value_heads
+            || weights.norm_weight.len() != d.value_dim
+        {
+            return Err(GdnError::Shape {
+                name: "GDN weights",
+            });
+        }
+        require_finite("GDN convolution weight", &weights.conv_weight)?;
+        require_finite("GDN A_log", &weights.a_log)?;
+        require_finite("GDN dt_bias", &weights.dt_bias)?;
+        require_finite("GDN norm weight", &weights.norm_weight)?;
+        self.weights = Some(weights);
+        Ok(())
+    }
+
+    pub const fn weights_configured(&self) -> bool {
+        self.weights.is_some()
+    }
+
+    pub fn decode_token(&self, hidden: &[f32], state: &mut GdnState) -> Result<Vec<f32>, GdnError> {
+        let weights = self.weights.as_ref().ok_or(GdnError::Shape {
+            name: "GDN weights",
+        })?;
+        if hidden.len() != self.config.hidden_size {
+            return Err(GdnError::Shape { name: "GDN hidden" });
+        }
+        if state.dimensions != self.config.dimensions {
+            return Err(GdnError::Shape { name: "GDN state" });
+        }
+        require_finite("GDN hidden", hidden)?;
+
+        // Work on a clone so a failed launch or non-finite intermediate never
+        // leaves a partially advanced request state.
+        let mut working = state.clone();
+        let mixed_qkv = weights.in_proj_qkv.apply(hidden)?;
+        let convolved = working.causal_conv_silu(&mixed_qkv, &weights.conv_weight)?;
+        let d = self.config.dimensions;
+        let key_width = d.key_heads * d.key_dim;
+        let value_width = d.value_heads * d.value_dim;
+        let query_base = &convolved[..key_width];
+        let key_base = &convolved[key_width..2 * key_width];
+        let value = &convolved[2 * key_width..2 * key_width + value_width];
+        let ratio = d.value_heads / d.key_heads;
+        let mut query = vec![0.0; d.value_heads * d.key_dim];
+        let mut key = vec![0.0; query.len()];
+        for head in 0..d.value_heads {
+            let source = head / ratio;
+            query[head * d.key_dim..(head + 1) * d.key_dim]
+                .copy_from_slice(&query_base[source * d.key_dim..(source + 1) * d.key_dim]);
+            key[head * d.key_dim..(head + 1) * d.key_dim]
+                .copy_from_slice(&key_base[source * d.key_dim..(source + 1) * d.key_dim]);
+        }
+        let a = weights.in_proj_a.apply(hidden)?;
+        let b = weights.in_proj_b.apply(hidden)?;
+        let mut decay = vec![0.0; d.value_heads];
+        let mut beta = vec![0.0; d.value_heads];
+        for head in 0..d.value_heads {
+            decay[head] = -weights.a_log[head].exp() * softplus(a[head] + weights.dt_bias[head]);
+            beta[head] = sigmoid(b[head]);
+        }
+        let core = working.gated_delta_step(&query, &key, value, &decay, &beta)?;
+        let z = weights.in_proj_z.apply(hidden)?;
+        let mut gated = vec![0.0; value_width];
+        for head in 0..d.value_heads {
+            let base = head * d.value_dim;
+            let row = &core[base..base + d.value_dim];
+            let rms = (row.iter().map(|value| value * value).sum::<f32>() / d.value_dim as f32
+                + self.config.rms_epsilon)
+                .sqrt()
+                .recip();
+            for dimension in 0..d.value_dim {
+                let normalized = row[dimension] * rms * weights.norm_weight[dimension];
+                gated[base + dimension] = normalized * silu(z[base + dimension]);
+            }
+        }
+        let output = weights.out_proj.apply(&gated)?;
+        require_finite("GDN output", &output)?;
+        *state = working;
+        Ok(output)
+    }
+}
+
+fn sigmoid(value: f32) -> f32 {
+    1.0 / (1.0 + (-value).exp())
+}
+
+fn softplus(value: f32) -> f32 {
+    if value > 20.0 {
+        value
+    } else {
+        (1.0 + value.exp()).ln()
+    }
+}
+
+fn silu(value: f32) -> f32 {
+    value * sigmoid(value)
+}
+
 fn l2_normalize_heads(values: &[f32], heads: usize, head_dim: usize) -> Result<Vec<f32>, GdnError> {
     let mut output = Vec::with_capacity(values.len());
     for head in 0..heads {
@@ -274,6 +542,15 @@ fn require_finite(name: &'static str, values: &[f32]) -> Result<(), GdnError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_layer() -> GdnReferenceLayer {
+        GdnReferenceLayer::new(GdnReferenceLayerConfig {
+            hidden_size: 2,
+            dimensions: GdnDimensions::new(2, 1, 1, 2, 2).unwrap(),
+            rms_epsilon: 1e-6,
+        })
+        .unwrap()
+    }
 
     #[test]
     fn production_dimensions_match_checkpoint_contract() {
@@ -366,5 +643,55 @@ mod tests {
             .unwrap();
         state.reset();
         assert_eq!(state.checksum(), before);
+    }
+
+    #[test]
+    fn reference_layer_applies_gated_delta_norm_and_projection_in_order() {
+        let mut layer = tiny_layer();
+        layer
+            .set_weights(GdnReferenceWeights {
+                in_proj_qkv: DenseMatrix::new(
+                    6,
+                    2,
+                    vec![
+                        1.0, 0.0, // q
+                        0.0, 1.0, // k
+                        1.0, 0.0, // k
+                        0.0, 1.0, // k
+                        1.0, 1.0, // v[0]
+                        0.0, 0.0, // v[1]
+                    ],
+                )
+                .unwrap(),
+                in_proj_z: DenseMatrix::new(2, 2, vec![1.0, 0.0, 1.0, 0.0]).unwrap(),
+                in_proj_a: DenseMatrix::new(1, 2, vec![0.0, 0.0]).unwrap(),
+                in_proj_b: DenseMatrix::new(1, 2, vec![0.0, 0.0]).unwrap(),
+                conv_weight: vec![1.0; 6 * 2],
+                a_log: vec![0.0],
+                dt_bias: vec![0.0],
+                norm_weight: vec![1.0, 1.0],
+                out_proj: DenseMatrix::new(2, 2, vec![1.0, 0.0, 0.0, 1.0]).unwrap(),
+            })
+            .unwrap();
+
+        let mut state = GdnState::new(GdnDimensions::new(2, 1, 1, 2, 2).unwrap()).unwrap();
+        let output = layer.decode_token(&[1.0, 2.0], &mut state).unwrap();
+        assert_eq!(output.len(), 2);
+        assert!(output.iter().all(|value| value.is_finite()));
+        assert!(output.iter().any(|value| value.abs() > 0.0));
+    }
+
+    #[test]
+    fn reference_layer_rejects_bad_weights_without_mutating_state() {
+        let layer = tiny_layer();
+        let before = layer.weights_configured();
+        let mut state = GdnState::new(GdnDimensions::new(2, 1, 1, 2, 2).unwrap()).unwrap();
+        let checksum = state.checksum();
+        assert!(matches!(
+            layer.decode_token(&[1.0, 2.0], &mut state),
+            Err(GdnError::Shape { .. })
+        ));
+        assert_eq!(state.checksum(), checksum);
+        assert!(!before);
     }
 }
