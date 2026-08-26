@@ -1,5 +1,7 @@
+pub mod chat;
 pub mod conformance;
 pub mod http;
+pub mod image;
 pub mod qwen35_runtime;
 pub mod response;
 pub mod schema;

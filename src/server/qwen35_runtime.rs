@@ -54,7 +54,12 @@ impl Qwen35StepSession for Qwen35CudaStepSession {
 impl Qwen35StepExecutor for Qwen35CudaStepExecutor {
     fn open(&self, request: RuntimeRequest) -> Result<Box<dyn Qwen35StepSession>, RuntimeError> {
         self.model
-            .open_with_cancel(&request.input_ids, request.max_new_tokens, &request.cancel)
+            .open_with_cancel_multimodal(
+                &request.input_ids,
+                request.max_new_tokens,
+                &request.cancel,
+                request.multimodal.as_ref(),
+            )
             .map(|session| {
                 Box::new(Qwen35CudaStepSession { session }) as Box<dyn Qwen35StepSession>
             })

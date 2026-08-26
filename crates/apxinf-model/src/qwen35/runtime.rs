@@ -1,6 +1,7 @@
 use super::config::Qwen35ModelConfig;
 
 const PREFILL_CHUNK_TOKENS: usize = 512;
+const MULTIMODAL_PREFILL_CHUNK_TOKENS: usize = 256;
 const MAX_PREFILL_CHUNK_TOKENS: usize = 1024;
 
 /// Tokens per bounded prefill block. Larger blocks amortize the per-block W4
@@ -12,15 +13,25 @@ const MAX_PREFILL_CHUNK_TOKENS: usize = 1024;
 /// inside the measured headroom (4606 MiB free with weights resident).
 /// Admission charges this per request via `request_state_bytes`, so an
 /// over-large chunk fails closed at startup rather than mid-request.
-/// Override with `APXINF_Q35_PREFILL_CHUNK`; clamped to
-/// `1..=MAX_PREFILL_CHUNK_TOKENS` so the workspace estimate stays bounded.
+///
+/// With the multimodal tower resident (~915 MiB BF16), free memory after
+/// weights drops to ~3.6 GiB and the chunk-512 request estimate (~4.0 GiB)
+/// no longer fits, so the default halves to 256 (~3.2 GiB estimate) in that
+/// configuration; the text-only default is unchanged. Override with
+/// `APXINF_Q35_PREFILL_CHUNK`; clamped to `1..=MAX_PREFILL_CHUNK_TOKENS` so
+/// the workspace estimate stays bounded.
 pub fn prefill_chunk_tokens() -> usize {
+    let default = if multimodal_enabled() {
+        MULTIMODAL_PREFILL_CHUNK_TOKENS
+    } else {
+        PREFILL_CHUNK_TOKENS
+    };
     std::env::var("APXINF_Q35_PREFILL_CHUNK")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
         .map(|value| value.min(MAX_PREFILL_CHUNK_TOKENS))
-        .unwrap_or(PREFILL_CHUNK_TOKENS)
+        .unwrap_or(default)
 }
 
 fn prefill_ranges(prompt_tokens: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
@@ -143,6 +154,15 @@ pub fn request_state_bytes(
         .ok_or_else(|| "request state byte estimate overflow".to_string())
 }
 
+/// Whether the multimodal capability is enabled for this process. Off by
+/// default: the vision tower is not loaded, `/v1/chat/completions` fails
+/// closed, and the text configuration is byte-identical to the text-only
+/// build. Flip with `APXINF_ENABLE_MULTIMODAL=1` only after the image suite
+/// passes.
+pub fn multimodal_enabled() -> bool {
+    std::env::var("APXINF_ENABLE_MULTIMODAL").is_ok_and(|value| value == "1")
+}
+
 #[cfg(feature = "cuda")]
 mod cuda_runtime {
     use std::sync::Arc;
@@ -157,6 +177,8 @@ mod cuda_runtime {
     };
     use super::super::loader::Qwen35CheckpointInventory;
     use super::super::model::greedy_argmax;
+    use super::super::vision::Qwen35VisionTower;
+    use crate::runtime::MultimodalPayload;
 
     enum Layer {
         Gdn(Qwen35CudaGdnLayer),
@@ -168,6 +190,15 @@ mod cuda_runtime {
         Full(Qwen35CudaFullAttentionState),
     }
 
+    /// Image-embedding rows to write over the text embeddings of the
+    /// `<|image_pad|>` positions during prefill. Rows are host BF16 bytes in
+    /// prompt order (`positions[i]` receives row `i`).
+    struct ImageScatter {
+        positions: Vec<usize>,
+        row_bytes: Vec<u8>,
+        row_stride: usize,
+    }
+
     /// Resident CUDA weights for the complete Qwen3.5 text stack.
     pub struct Qwen35CudaModel {
         backend: CudaBackend,
@@ -177,6 +208,8 @@ mod cuda_runtime {
         final_norm: Tensor,
         lm_head: Qwen35Bf16Projection,
         layers: Vec<Layer>,
+        /// Loaded only when `APXINF_ENABLE_MULTIMODAL=1` (~880 MiB BF16).
+        vision: Option<Qwen35VisionTower>,
     }
 
     impl Qwen35CudaModel {
@@ -260,6 +293,12 @@ mod cuda_runtime {
                 };
                 layers.push(layer);
             }
+            let vision = if super::multimodal_enabled() {
+                eprintln!("qwen35: loading vision tower (multimodal enabled)");
+                Some(Qwen35VisionTower::from_inventory(&backend, inventory)?)
+            } else {
+                None
+            };
             Ok(Arc::new(Self {
                 backend,
                 config,
@@ -268,6 +307,7 @@ mod cuda_runtime {
                 final_norm,
                 lm_head,
                 layers,
+                vision,
             }))
         }
 
@@ -309,6 +349,20 @@ mod cuda_runtime {
             max_new_tokens: usize,
             cancel: &crate::runtime::CancellationToken,
         ) -> Result<Qwen35CudaSession, String> {
+            self.open_with_cancel_multimodal(input_ids, max_new_tokens, cancel, None)
+        }
+
+        /// Open a session, optionally scattering a vision embedding over the
+        /// `<|image_pad|>` positions. The vision tower forward runs here, on
+        /// the caller's (GPU worker) thread, so image work is serialized with
+        /// text work on the single device.
+        pub fn open_with_cancel_multimodal(
+            self: &Arc<Self>,
+            input_ids: &[u32],
+            max_new_tokens: usize,
+            cancel: &crate::runtime::CancellationToken,
+            multimodal: Option<&MultimodalPayload>,
+        ) -> Result<Qwen35CudaSession, String> {
             let request_capacity =
                 super::request_capacity(input_ids.len(), max_new_tokens, self.max_model_len)?;
             if let Some(token_id) = input_ids
@@ -318,6 +372,10 @@ mod cuda_runtime {
             {
                 return Err(format!("token id {token_id} is outside model vocabulary"));
             }
+            let image = match multimodal {
+                None => None,
+                Some(payload) => Some(self.prepare_image_scatter(input_ids, payload)?),
+            };
             let states = self.new_states(request_capacity)?;
             let mut session = Qwen35CudaSession {
                 model: Arc::clone(self),
@@ -333,8 +391,60 @@ mod cuda_runtime {
                 #[cfg(test)]
                 prefill_calls: 0,
             };
-            session.prefill(input_ids, cancel)?;
+            session.prefill(input_ids, cancel, image.as_ref())?;
             Ok(session)
+        }
+
+        /// Run the vision tower and pair each merged embedding row with the
+        /// prompt position of the corresponding `<|image_pad|>` token.
+        fn prepare_image_scatter(
+            &self,
+            input_ids: &[u32],
+            payload: &MultimodalPayload,
+        ) -> Result<ImageScatter, String> {
+            let vision = self.vision.as_ref().ok_or_else(|| {
+                "multimodal request received but the vision tower is not loaded \
+                 (APXINF_ENABLE_MULTIMODAL is off)"
+                    .to_string()
+            })?;
+            let merged = vision.forward(&self.backend, &payload.pixel_values, payload.grid)?;
+            let dims = merged.shape().dims().to_vec();
+            if dims.len() != 2 || dims[1] != self.config.hidden_size {
+                return Err(format!(
+                    "vision embedding shape {dims:?} does not match hidden size {}",
+                    self.config.hidden_size
+                ));
+            }
+            let positions: Vec<usize> = input_ids
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| **token == self.config.image_token_id)
+                .map(|(index, _)| index)
+                .collect();
+            if positions.len() != dims[0] {
+                return Err(format!(
+                    "prompt has {} image tokens but the vision tower produced {} rows",
+                    positions.len(),
+                    dims[0]
+                ));
+            }
+            let host = self
+                .backend
+                .to_cpu(&merged)
+                .map_err(|error| format!("vision embedding download: {error}"))?;
+            let values = host
+                .as_bf16()
+                .map_err(|error| format!("vision embedding dtype: {error}"))?;
+            let row_stride = dims[1] * std::mem::size_of::<half::bf16>();
+            let mut row_bytes = Vec::with_capacity(values.len() * 2);
+            for value in values.iter() {
+                row_bytes.extend_from_slice(&value.to_le_bytes());
+            }
+            Ok(ImageScatter {
+                positions,
+                row_bytes,
+                row_stride,
+            })
         }
 
         fn new_states(&self, request_capacity: usize) -> Result<Vec<State>, String> {
@@ -374,6 +484,7 @@ mod cuda_runtime {
             &mut self,
             input_ids: &[u32],
             cancel: &crate::runtime::CancellationToken,
+            image: Option<&ImageScatter>,
         ) -> Result<(), String> {
             if input_ids.is_empty() {
                 return Err("prefill requires at least one token".into());
@@ -397,6 +508,9 @@ mod cuda_runtime {
                     .backend
                     .embedding(&self.model.embedding, chunk_ids)
                     .map_err(|error| format!("embedding prefill failed: {error}"))?;
+                if let Some(image) = image {
+                    scatter_image_rows(&hidden, image, range.clone())?;
+                }
                 if std::env::var_os("APXINF_DEBUG_HIDDEN_DIR").is_some() {
                     for row in 0..chunk_ids.len() {
                         let row_hidden = row_slice(&self.model.backend, &hidden, row)?;
@@ -571,6 +685,39 @@ mod cuda_runtime {
         }
     }
 
+    /// Overwrite the embedding rows of image-pad tokens that fall inside the
+    /// current prefill chunk with their vision-embedding rows. The copy
+    /// aliases the chunk's device memory through a bounds-checked view, so
+    /// non-image rows are untouched (no download/re-upload round trip).
+    fn scatter_image_rows(
+        hidden: &Tensor,
+        image: &ImageScatter,
+        chunk: std::ops::Range<usize>,
+    ) -> Result<(), String> {
+        let dims = hidden.shape().dims();
+        if dims.len() != 2 || dims[1] * std::mem::size_of::<half::bf16>() != image.row_stride {
+            return Err(format!(
+                "image scatter row width {} does not match hidden {:?}",
+                image.row_stride, dims
+            ));
+        }
+        let buffer = apxinf_cuda::CudaBuffer::from_tensor(hidden)
+            .map_err(|error| format!("image scatter buffer: {error}"))?;
+        for (row_index, position) in image.positions.iter().enumerate() {
+            if !chunk.contains(position) {
+                continue;
+            }
+            let row_in_chunk = position - chunk.start;
+            let view = buffer
+                .view(row_in_chunk * image.row_stride, image.row_stride)
+                .map_err(|error| format!("image scatter view: {error}"))?;
+            let source_start = row_index * image.row_stride;
+            view.copy_from_host(&image.row_bytes[source_start..source_start + image.row_stride])
+                .map_err(|error| format!("image scatter copy: {error}"))?;
+        }
+        Ok(())
+    }
+
     fn row_slice(backend: &CudaBackend, hidden: &Tensor, row: usize) -> Result<Tensor, String> {
         let dims = hidden.shape().dims();
         if dims.len() != 2 || row >= dims[0] {
@@ -736,8 +883,20 @@ pub use cuda_runtime::{Qwen35CudaModel, Qwen35CudaSession};
 mod tests {
     use super::super::config::Qwen35ModelConfig;
 
+    /// Tests below read (and one mutates) the prefill-chunk environment
+    /// variables; serialize them so parallel test threads cannot observe a
+    /// mid-mutation value.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn prefill_plan_bounds_every_block_to_the_configured_chunk() {
+        let _guard = env_guard();
         let chunk = super::prefill_chunk_tokens();
         assert!(chunk > 0 && chunk <= super::MAX_PREFILL_CHUNK_TOKENS);
         // Contiguous, gapless cover of the prompt with every block bounded.
@@ -759,13 +918,15 @@ mod tests {
 
     #[test]
     fn prefill_chunk_override_is_clamped_to_the_workspace_bound() {
-        // Serial test process: restore the environment before asserting so a
-        // failure cannot leak the override into other cases.
+        let _guard = env_guard();
+        // Restore the environment before asserting so a failure cannot leak
+        // the override into other cases.
         let restore = |previous: Option<String>| match previous {
             Some(value) => std::env::set_var("APXINF_Q35_PREFILL_CHUNK", value),
             None => std::env::remove_var("APXINF_Q35_PREFILL_CHUNK"),
         };
         let previous = std::env::var("APXINF_Q35_PREFILL_CHUNK").ok();
+        let previous_multimodal = std::env::var("APXINF_ENABLE_MULTIMODAL").ok();
 
         std::env::set_var("APXINF_Q35_PREFILL_CHUNK", "128");
         let explicit = super::prefill_chunk_tokens();
@@ -775,12 +936,25 @@ mod tests {
         let zero_rejected = super::prefill_chunk_tokens();
         std::env::set_var("APXINF_Q35_PREFILL_CHUNK", "not-a-number");
         let garbage_rejected = super::prefill_chunk_tokens();
+        // With the vision tower resident the chunk-512 workspace no longer
+        // fits; the multimodal default must drop to 256 (still overridable).
+        std::env::remove_var("APXINF_Q35_PREFILL_CHUNK");
+        std::env::set_var("APXINF_ENABLE_MULTIMODAL", "1");
+        let multimodal_default = super::prefill_chunk_tokens();
+        std::env::remove_var("APXINF_ENABLE_MULTIMODAL");
+        let text_default = super::prefill_chunk_tokens();
+        match previous_multimodal {
+            Some(value) => std::env::set_var("APXINF_ENABLE_MULTIMODAL", value),
+            None => std::env::remove_var("APXINF_ENABLE_MULTIMODAL"),
+        }
         restore(previous);
 
         assert_eq!(explicit, 128);
         assert_eq!(clamped, super::MAX_PREFILL_CHUNK_TOKENS);
         assert_eq!(zero_rejected, super::PREFILL_CHUNK_TOKENS);
         assert_eq!(garbage_rejected, super::PREFILL_CHUNK_TOKENS);
+        assert_eq!(multimodal_default, super::MULTIMODAL_PREFILL_CHUNK_TOKENS);
+        assert_eq!(text_default, super::PREFILL_CHUNK_TOKENS);
     }
 
     #[test]
@@ -792,6 +966,7 @@ mod tests {
 
     #[test]
     fn request_state_estimate_accounts_for_all_gdn_and_attention_buffers() {
+        let _guard = env_guard();
         let raw = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../fixtures/qwen35-metadata/config.json"),

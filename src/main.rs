@@ -292,7 +292,14 @@ fn run_serve(args: ServeArgs) -> Result<(), String> {
         let executor = Arc::new(Qwen35CudaStepExecutor::new(model));
         let runtime = Qwen35ProtocolRuntime::new(capabilities, args.queue_capacity, executor)
             .map_err(|error| format!("runtime initialization failed: {error}"))?;
-        let service = Arc::new(ProtocolService::new_unready(runtime, false));
+        let mut service = ProtocolService::new_unready(runtime, false);
+        if apxinf_model::qwen35::multimodal_enabled() {
+            let chat =
+                server::chat::ChatPreprocessor::from_model_dir(&args.model, args.max_model_len)
+                    .map_err(|error| format!("multimodal chat initialization failed: {error}"))?;
+            service = service.with_chat(chat);
+        }
+        let service = Arc::new(service);
         service
             .warmup()
             .map_err(|error| format!("CUDA warmup failed: {error}"))?;

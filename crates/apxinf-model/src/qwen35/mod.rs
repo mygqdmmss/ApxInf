@@ -7,6 +7,7 @@ pub mod gdn;
 pub mod loader;
 pub mod model;
 pub mod runtime;
+pub mod vision;
 pub mod weights;
 
 #[cfg(feature = "cuda")]
@@ -37,7 +38,9 @@ pub use model::{
     greedy_argmax, ExecutorError, GenerationOutput, Qwen35ReferenceExecutor, Qwen35RequestState,
     StopReason,
 };
-pub use runtime::request_state_bytes;
+pub use runtime::{multimodal_enabled, request_state_bytes};
 #[cfg(feature = "cuda")]
 pub use runtime::{Qwen35CudaModel, Qwen35CudaSession};
+#[cfg(feature = "cuda")]
+pub use vision::{Qwen35VisionTower, VisionProbe};
 pub use weights::{PackedLinearLayout, WeightLayoutError};

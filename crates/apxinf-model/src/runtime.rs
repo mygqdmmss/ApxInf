@@ -30,11 +30,22 @@ impl RuntimeCapabilities {
     }
 }
 
+/// Preprocessed image input for a multimodal request. `pixel_values` is the
+/// processor output (`[t*h*w, 1536]` row-major, BF16) and `grid` is the
+/// `[t, h, w]` patch grid. The vision tower forward runs on the GPU worker
+/// thread so image and text requests stay serialized on the single device.
+#[derive(Debug, Clone)]
+pub struct MultimodalPayload {
+    pub pixel_values: Vec<half::bf16>,
+    pub grid: [u32; 3],
+}
+
 #[derive(Debug, Clone)]
 pub struct RuntimeRequest {
     pub input_ids: Vec<u32>,
     pub max_new_tokens: usize,
     pub cancel: CancellationToken,
+    pub multimodal: Option<MultimodalPayload>,
 }
 
 impl RuntimeRequest {
@@ -43,6 +54,7 @@ impl RuntimeRequest {
             input_ids,
             max_new_tokens,
             cancel: CancellationToken::new(),
+            multimodal: None,
         }
     }
 }

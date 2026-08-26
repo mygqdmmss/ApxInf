@@ -167,6 +167,10 @@ pub struct ProtocolService<R> {
     stub: bool,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
     recovery_lock: std::sync::Mutex<()>,
+    /// Present only when the multimodal capability is enabled; its absence
+    /// makes `/v1/chat/completions` fail closed with `unsupported_capability`
+    /// and keeps `/health.capabilities.multimodal` false.
+    chat: Option<std::sync::Arc<crate::server::chat::ChatPreprocessor>>,
 }
 
 impl<R: ProtocolRuntime> ProtocolService<R> {
@@ -176,6 +180,13 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
 
     pub fn new_unready(runtime: R, stub: bool) -> Self {
         Self::with_readiness(runtime, stub, false)
+    }
+
+    /// Enable the multimodal chat endpoint. Only called when
+    /// `APXINF_ENABLE_MULTIMODAL=1` and the vision tower is resident.
+    pub fn with_chat(mut self, chat: crate::server::chat::ChatPreprocessor) -> Self {
+        self.chat = Some(std::sync::Arc::new(chat));
+        self
     }
 
     fn with_readiness(runtime: R, stub: bool, ready: bool) -> Self {
@@ -191,6 +202,7 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
             stub,
             ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(ready)),
             recovery_lock: std::sync::Mutex::new(()),
+            chat: None,
         }
     }
 
@@ -211,7 +223,7 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
             "capabilities": {
                 "pretokenized_input_ids": true,
                 "token_id_output": true,
-                "multimodal": false,
+                "multimodal": self.chat.is_some(),
             },
             "stub": self.stub,
         }))
@@ -371,6 +383,84 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
             stream,
             finished: false,
         })
+    }
+
+    /// `/v1/chat/completions`: the multimodal image endpoint. Fails closed
+    /// with `unsupported_capability` whenever the capability is not enabled,
+    /// per the multimodal contract's unsupported rule (HTTP 400 and never
+    /// 200/500, no fallback, images are never ignored).
+    pub fn handle_chat_completions(&self, raw: &[u8], cancel: CancellationToken) -> HttpResponse {
+        let Some(chat) = self.chat.as_ref() else {
+            return HttpResponse {
+                status: 400,
+                content_type: "application/json",
+                body: br#"{"error":{"type":"unsupported_capability","message":"multimodal image input is not enabled on this service"}}"#
+                    .to_vec(),
+            };
+        };
+        let prepared = match chat.prepare(raw) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return invalid_response(ProtocolError::invalid(&error.0));
+            }
+        };
+        if !self.ready.load(Ordering::Acquire) {
+            return runtime_response(RuntimeError::Unhealthy);
+        }
+        let prompt_tokens = prepared.input_ids.len();
+        let max_new_tokens = prepared.max_new_tokens;
+        let mut runtime_request = RuntimeRequest::new(prepared.input_ids, max_new_tokens);
+        runtime_request.cancel = cancel;
+        runtime_request.multimodal = Some(prepared.multimodal);
+        let request_cancel = runtime_request.cancel.clone();
+        let stream = match self.runtime.start(runtime_request) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.note_runtime_error(&error);
+                return runtime_response(error);
+            }
+        };
+        let mut generation = ActiveGeneration {
+            request_id: self.next_id(),
+            prompt_tokens,
+            max_new_tokens,
+            ignore_eos: false,
+            output_ids: Vec::with_capacity(max_new_tokens),
+            request_cancel,
+            stream,
+            finished: false,
+        };
+        loop {
+            match generation.next_output_token() {
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(error) => {
+                    self.note_runtime_error(&error);
+                    return runtime_response(error);
+                }
+            }
+        }
+        let output_ids = generation.output_ids();
+        let hit_eos = output_ids
+            .last()
+            .is_some_and(|token| EOS_TOKEN_IDS.contains(token));
+        let content = match chat.decode(output_ids) {
+            Ok(content) => content,
+            Err(error) => {
+                return runtime_response(RuntimeError::Execution(error));
+            }
+        };
+        HttpResponse {
+            status: 200,
+            content_type: "application/json",
+            body: crate::server::chat::chat_completion_json(
+                generation.request_id(),
+                content.trim(),
+                prompt_tokens,
+                output_ids.len(),
+                if hit_eos { "stop" } else { "length" },
+            ),
+        }
     }
 
     fn note_runtime_error(&self, error: &RuntimeError) {

@@ -8,7 +8,9 @@ use crate::server::service::{HttpResponse, ProtocolRuntime, ProtocolService};
 
 pub const GENERATE_PATH: &str = "/v1/evaluations/generate";
 const MAX_HEADER_BYTES: usize = 16 * 1024;
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+/// Sized for a 32K-token generate body and for base64 PNG payloads on the
+/// chat endpoint (a 448x448 RGB PNG can approach 1 MiB once encoded).
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn serve<S: ProtocolRuntime + 'static>(
     listener: TcpListener,
@@ -35,6 +37,20 @@ pub fn handle_connection<S: ProtocolRuntime>(
     let request = read_request(&mut stream)?;
     if request.method == "GET" && request.path == "/health" {
         return write_response(&mut stream, service.health_response());
+    }
+    if request.method == "POST" && request.path == "/v1/chat/completions" {
+        // Same disconnect discipline as the generate path: a vision forward
+        // plus prefill can hold the capacity slot well before any response
+        // byte is written.
+        let cancel = CancellationToken::new();
+        let monitor = spawn_disconnect_monitor(&stream, cancel.clone());
+        let response = service.handle_chat_completions(&request.body, cancel);
+        let result = write_response(&mut stream, response);
+        let _ = stream.shutdown(Shutdown::Both);
+        if let Some(monitor) = monitor {
+            let _ = monitor.join();
+        }
+        return result;
     }
     if request.method != "POST" || request.path != GENERATE_PATH {
         return write_response(

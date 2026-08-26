@@ -30,8 +30,8 @@ pub use qwen35::{
 pub use qwen3vl::{GeneralQwen3VL, Qwen3VLConfig, Qwen3VLTextWeights};
 pub use registry::{get, list, register};
 pub use runtime::{
-    AdmissionDecision, CancellationToken, RuntimeCapabilities, RuntimeError, RuntimeHandle,
-    RuntimeRequest, RuntimeResult, RuntimeTicket, RuntimeWorker,
+    AdmissionDecision, CancellationToken, MultimodalPayload, RuntimeCapabilities, RuntimeError,
+    RuntimeHandle, RuntimeRequest, RuntimeResult, RuntimeTicket, RuntimeWorker,
 };
 pub use vla::{
     Action, ImageLayout, InferenceSpec, Observation, PreparedInference, VisionObservation,

@@ -1186,6 +1186,217 @@ locating the surviving process and reading its results. Long-running clients
 are therefore started detached (`setsid nohup ... &`) with file-based
 output, which does not get re-executed.
 
+## Multimodal Bonus Implementation (2026-08-26 evening session)
+
+Scope: the full Qwen3.5 vision path plus `POST /v1/chat/completions`, per
+`multimodal-contract-v1.json`. Out of scope and untouched: MTP/speculative
+decoding, prefix cache, C4/C8, long-context bonus, KV quantization.
+
+### Availability of the official image suite (material limitation)
+
+The official multimodal generator, public images, prompts and answers are
+**not present on this host**: a full search of `benchmarks/qwen38_4090/`,
+`/mnt/chuangxin/team2` and prior evidence directories finds the category
+names and seed only inside `multimodal-contract-v1.json` itself, and
+`fetch_public_corpus.py` handles only the text corpus. The evaluator
+(`run_evaluation.py`, `score_multimodal.py`) consumes platform-generated
+reports rather than producing image cases. Consequently "public 4/4" cannot
+be literally self-verified here; the local self-verification below uses
+(a) stage-exact oracle equality where exactness is achievable, and (b) four
+self-built contract-style probes (same 448x448 deterministic-PNG shape, same
+four categories, same request format) with locally known ground truth.
+This distinction is stated plainly rather than claimed away.
+
+### Correctness evidence chain (strongest available per stage)
+
+| Stage | Criterion | Result |
+|---|---|---|
+| PNG decode + preprocess (`(x-127.5)/127.5`, patchify) | **bit equality** with `Qwen2VLImageProcessorFast` output on the oracle probe image | 0 of 1,204,224 f32 elements differ |
+| chat template render + tokenize + image-pad expansion | **token equality** with `Qwen3VLProcessor.apply_chat_template(enable_thinking=False)` | exact on all 4 probe requests (224-233 tokens each) |
+| vision tower (27 blocks, CUDA BF16) vs FP32 oracle | per-stage golden comparison | block00 max_abs_diff 0.069 (golden max 5.6), block13 4.87 (max 372.7), block26 352 (max 4477) — 1.2-8% on outlier channels, mean_abs ratio ~2.7% |
+| merged `[196, 5120]` embedding | drift + cosine | max_abs_diff 4.21 (golden max_abs 142.8), mean_abs_diff 0.0078 (golden mean_abs 0.278), **cosine 0.99971887** |
+| fail-closed probe (capability off) | contract `unsupported_rule` | HTTP 400, `error.type=unsupported_capability`, `/health.capabilities.multimodal=false` |
+
+The BF16-vs-FP32 drift compounds through 27 blocks exactly as on the text
+stack; the merger LayerNorm renormalizes before the LLM consumes the
+embedding, and the cosine shows direction is preserved. GPU test
+`vision_tower_matches_oracle_stage_by_stage` (ignored, requires GPU +
+checkpoint + oracle dir) pins these bounds at ~2x measured.
+
+### Implementation
+
+- `crates/apxinf-cuda`: new `vision_sdpa_bf16_wide_kernel` — the existing
+  vision SDPA hardcoded head_dim 64 (2 elements/thread); the wide variant
+  owns up to 4 strided elements per thread (any even head_dim <= 128,
+  Qwen3.5 vision is 72). At head_dim 64 it is **bit-identical** to the
+  narrow kernel (`vision_sdpa_bf16_wide_bit_matches_narrow_kernel_at_head_dim_64`),
+  and the dispatcher keeps the narrow kernel for 64 so the Qwen3-VL path is
+  untouched. New `gelu_erf_bf16_kernel`: the patch merger uses PyTorch's
+  default `nn.GELU()` (exact erf), *not* the tanh form the block MLPs use —
+  verified against HF `Qwen3VLVisionPatchMerger` source.
+- `crates/apxinf-model/src/qwen35/vision.rs`: the 27-block tower + merger on
+  CUDA backend primitives. Constants are hardcoded to the frozen checkpoint
+  (config.json is digest-verified at load) with per-tensor shape assertions;
+  ~880 MiB BF16 resident, loaded **only when `APXINF_ENABLE_MULTIMODAL=1`**.
+  Bilinear pos-embed interpolation (align_corners=true) and merge-block-order
+  position ids match `transformers.vision_utils` exactly; the
+  `[784,1152] -> [196,4608]` merge is a pure reshape (rows contiguous).
+- `crates/apxinf-model/src/qwen35/runtime.rs`: `open_with_cancel_multimodal`
+  runs the vision forward on the GPU worker thread (image and text requests
+  stay serialized), validates that image-pad count equals merged rows, and
+  `scatter_image_rows` overwrites exactly those embedding rows through a
+  bounds-checked device-buffer view during prefill.
+- `src/server/chat.rs` + `src/server/image.rs`: strict OpenAI-parts parsing
+  (exactly one `data:image/png;base64` image_url + one text part, temperature
+  0, stream=false, `enable_thinking=false`; anything else is a 400), manual
+  template rendering (the minijinja `apply_chat_template` wrapper collapses
+  consecutive newlines and would corrupt `<think>\n\n</think>\n\n`), PNG
+  decode via the `png` crate, and the OpenAI-style response body.
+  `/v1/chat/completions` with the capability off fails closed per contract.
+  EOS for chat is the existing `EOS_TOKEN_IDS = [248046, 248044]`, which
+  matches `generation_config.json.eos_token_id` exactly.
+- Dependencies added to the bin crate: `png`, `base64` (Cargo.lock updated;
+  nothing enters the model/kernel crates).
+
+### Self-built probe suite (local ground truth)
+
+`/tmp/apxinf-vision-e2e-gen.py` builds one 448x448 deterministic PNG per
+contract category — seven_segment_ocr ("382" on a dark seven-segment
+display), spatial_color (2x2 grid, top-left red), bar_arithmetic (two bars
+labeled 7 and 5, sum 12), object_count (5 circles) — plus, from the offline
+oracle venv, the HF-processor golden `input_ids` and the exact
+`/v1/chat/completions` request bodies. These are **not** the official public
+cases; they verify the full image path end to end with known answers.
+
+### VRAM budget fix required for the multimodal configuration
+
+The first multimodal service start failed closed at admission, exactly as
+designed: with the vision tower resident, free memory after weights is
+~3634 MiB while the chunk-512 request estimate is 4037 MiB. Fix:
+`prefill_chunk_tokens()` defaults to 256 when `APXINF_ENABLE_MULTIMODAL=1`
+(estimate 3259 MiB, ~375 MiB slack), still overridable via
+`APXINF_Q35_PREFILL_CHUNK`; the text-only default stays 512 and the
+text-only configuration is untouched. Unit test covers both defaults; the
+runtime env-var tests now serialize on a mutex (a pre-existing parallel-test
+race that this change widened and then fixed).
+
+### End-to-end results on the designated GPU (strict service, 2026-08-26)
+
+Service: release build, GPU1 under `flock`, `APXINF_ENABLE_MULTIMODAL=1`,
+resident 20454 MiB (19498 text + ~956 vision). `/health` reports
+`status=ok`, `capabilities.multimodal=true`, `fallback_active=false`.
+
+| Check | Result |
+|---|---|
+| self-built image probes | **4/4 exact** — "382", "red", "12", "5"; 1.0-2.0 s per request end to end (`/tmp/apxinf-evidence/vision-e2e/vision-e2e.json`) |
+| frozen protocol gate | **12/12 passed** (`/tmp/apxinf-evidence/protocol-mm`, SHA `3e600e5b...`) |
+| public functional (text) | **6/6 exact** on the multimodal service; 8K longdoc cases ~24 s each at chunk 256 (`/tmp/apxinf-evidence/functional-mm/functional.json`) |
+| mixed text+image soak | **36/36** (18 short + 6 x 1K text + 12 image chats interleaved), success rate 1.0, healthy after (`/tmp/apxinf-evidence/mm-soak/mm-soak.json`) |
+| frozen 128-token text request on the multimodal service | output_ids SHA `20d981cb...` — **byte-identical** to the accepted layer-2 text configuration: the resident vision tower changes no text numerics |
+| peak VRAM during the run | 20914 MiB of 24564 (`/tmp/apxinf-evidence/mm-vram.txt`) |
+
+### Text-only (default) configuration re-verified after the change
+
+A fresh default service (same binary, no `APXINF_ENABLE_MULTIMODAL`) on the
+designated GPU: `/health.capabilities.multimodal=false`; the image probe
+fails closed with **HTTP 400 and `error.type=unsupported_capability`** (the
+contract's required unsupported behaviour — previously this path returned a
+non-compliant 404 because the route did not exist); the frozen 128-token
+request returns the same SHA `20d981cb...` (three-way byte equality:
+historical config, multimodal service, post-change default service); frozen
+protocol gate **12/12** (`/tmp/apxinf-evidence/protocol-textonly-after-mm`).
+The vision tower is not loaded, resident memory and prefill chunk (512) are
+unchanged, so every layer-1/layer-2 performance number in this report still
+describes the text-only configuration.
+
+Full regression on the final tree: `apxinf-cuda` GPU suite 102 passed with
+only the two pre-existing environmental `fp8` failures (cuBLAS status 15,
+unchanged baseline); `apxinf-model` qwen35 GPU suite 58 passed; CPU suites
+98 (model lib) and 62 (bin, including the new image/chat/template tests);
+`cargo check --workspace`, `cargo fmt --check`, `git diff --check` clean.
+Shutdown verified: port 18080 free, all four GPUs at 1 MiB, GPU-job lock
+free.
+
+### Multimodal scoring status (stated honestly)
+
+- The **capability flip condition was met on the strongest locally available
+  evidence**: bit-exact preprocessing, token-exact prompt construction,
+  oracle-aligned vision tower (cosine 0.99972), and 4/4 on self-built
+  contract-style probes with locally known answers. The official public
+  4-case suite is not present on this host, so the literal "public 4/4"
+  remains a platform-run item; the 2 public correctness points, 6 private
+  points, and 2 platform-verified integration points are all decided by the
+  evaluation platform. No multimodal score is claimed here.
+- To serve with the capability declared, start with
+  `APXINF_ENABLE_MULTIMODAL=1` (the tower loads at startup, chunk defaults
+  to 256). Without it the service is the unchanged text-only submission and
+  now satisfies the contract's fail-closed probe rule.
+- Rollback: unset `APXINF_ENABLE_MULTIMODAL` (single switch; no other
+  behavioural change is reachable without it).
+
+Known limitations, recorded for the platform run: (1) images whose
+dimensions are not multiples of 32 (or outside the 65,536..16,777,216 pixel
+window) are rejected with 400 rather than resampled — the contract fixes
+both suites at 448x448, so this is out-of-contract input only; (2) only the
+contract request shape is accepted (one PNG image_url + one text part,
+temperature 0, `enable_thinking=false`, stream=false); (3) the vision
+forward adds ~0.4 s and the QKV column split currently round-trips through
+host memory (~30 ms per image) — functional, not tuned.
+
+## Unified Test Entry (`test.py`) Run (2026-08-27)
+
+The README's single test entry was exercised end to end now that the
+optimized service completes the public suite in minutes (the pre-optimization
+attempt had been interrupted after >16 minutes on the first 8K case).
+
+- `test.py run`'s literal invocation cannot produce output on this host: the
+  script passes no `--trajectory-reference`, and `run_evaluation.py`
+  unconditionally raises `provide --trajectory-reference, or capture one
+  from the vLLM control` *before* any artifact is written (raise at
+  run_evaluation.py:1461; `raw.jsonl`/`submission.json` writes start at
+  :1588). The platform's vLLM trajectory artifact is absent (re-verified:
+  `artifacts/apxinf/oracle/` holds only golden-generation payloads, no
+  `trajectory_reference.v1` document).
+- Therefore the **identical command line that `test.py run` builds** was
+  executed directly with one addition, `--capture-trajectory-reference`
+  (README §4: public runs are local debugging only, not official results).
+  Service: strict text-only release binary on the designated GPU under
+  `flock`.
+
+Result: run `20260826-155907-apxinf`
+(`benchmarks/qwen38_4090/evaluation/runs/`, ~13 minutes end to end) with a
+complete `submission.json` (schema `leaderboard_submission.v1`, profile
+`public_calibration` — 0 warmup / 1 repeat per cell by design):
+
+| Field | Value |
+|---|---|
+| `correctness.protocol_pass` | true |
+| `correctness.public_cases_passed` | **6/6** |
+| `reliability` | all five booleans true, `request_success_rate` 1.0 |
+| TTFT (single calibration repeat) | 1K 1.88 s, 2K 6.55 s, 4K 7.32 s, 8K 14.83 s, 16K 34.94 s |
+| TPOT | 67-77 ms across cells |
+| peak VRAM | 20,750-22,832 MiB |
+| `evidence.contract_sha256` | `520349b1...` (frozen contract) |
+| `evidence.public_manifest_sha256` | `1ec4f360...` (matches the approved public dataset) |
+
+**Trajectory disclosure**: `public_trajectory_tokens_passed = 256/256` is
+meaningless as a score — the reference was captured from this same run
+(self-comparison passes by construction) solely so the pipeline could emit a
+complete artifact. The captured file is kept outside the repository
+(`/tmp/apxinf-evidence/captured-trajectory-DEBUG-ONLY.json`), is not an
+approved `vLLM` control, and no trajectory result is claimed. The
+`midterm_leaderboard` profile (1+5 repeats, official scoring) remains a
+platform action with the platform's own reference artifact.
+
+`test.py check` **passed** ("assignment checks passed"): the script's
+`--help` sweep over all evaluation programs plus `cargo check --workspace
+--locked` on the main repository checkout. Operational note: with the main
+repository's default `target/` on the network volume the same check ran
+>15 minutes without finishing (linker in uninterruptible disk sleep); with
+`CARGO_TARGET_DIR` pointed at local disk it completed in 45 s. The
+environment override changes where build artifacts are written, not what is
+checked.
+
 ## Layer-2 Performance Hypotheses (queued, not yet measured)
 
 All service evidence in this report was produced by `target/debug/apxinf`

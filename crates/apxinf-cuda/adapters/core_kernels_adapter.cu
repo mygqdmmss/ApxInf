@@ -515,6 +515,16 @@ extern "C" cudaError_t apxinf_gelu_tanh_bf16(
     return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_gelu_erf_bf16(
+    const void* input, void* output, uint32_t count, void* stream)
+{
+    dim3 grid((count + BLOCK_SIZE - 1) / BLOCK_SIZE, 1, 1);
+    dim3 block(BLOCK_SIZE, 1, 1);
+    gelu_erf_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)input, (__nv_bfloat16*)output, count);
+    return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_add_bias_bf16(
     const void* input, const void* bias, void* output,
     uint32_t cols, uint32_t rows, void* stream)

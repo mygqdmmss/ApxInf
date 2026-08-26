@@ -1164,6 +1164,39 @@ fn vision_sdpa_bf16_wide_bit_matches_narrow_kernel_at_head_dim_64() {
     assert_eq!(narrow_bits, wide_bits);
 }
 
+/// Exact-erf GELU against a double-precision reference (Abramowitz-Stegun
+/// 7.1.26 has |error| < 1.5e-7, far below BF16 resolution).
+#[test]
+fn gelu_erf_bf16_matches_reference() {
+    use crate::kernels::activation::gelu_erf;
+
+    fn erf_ref(x: f64) -> f64 {
+        let sign = if x < 0.0 { -1.0 } else { 1.0 };
+        let x = x.abs();
+        let t = 1.0 / (1.0 + 0.3275911 * x);
+        let y = 1.0
+            - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+                + 0.254829592)
+                * t
+                * (-x * x).exp();
+        sign * y
+    }
+
+    let ctx = CudaContext::new(0).expect("CUDA device required");
+    let input: Vec<f32> = (-40..40).map(|i| (i as f32) * 0.2).collect();
+    let expected: Vec<f32> = input
+        .iter()
+        .map(|&x| {
+            let x = x as f64;
+            (0.5 * x * (1.0 + erf_ref(x / std::f64::consts::SQRT_2))) as f32
+        })
+        .collect();
+
+    let bf_in = upload_fp32_as_bf16(&ctx, &input, vec![input.len()]).unwrap();
+    let out = gelu_erf(&ctx, &bf_in).unwrap();
+    assert_bf16_close_elementwise(&download_bf16_as_fp32(&out).unwrap(), &expected);
+}
+
 /// Odd head_dims and >128 are rejected instead of silently corrupted.
 #[test]
 fn vision_sdpa_rejects_unsupported_head_dims() {
