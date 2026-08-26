@@ -6,22 +6,18 @@
 >
 > 文档性质：实现前的技术决策、执行计划与验收规范
 >
-> 目标：三套方案描述不同的高分优化路径；它们共享同一个 correctness/service 底座，实际执行以“先 eligible、再按分/人时优化”为准。当前 starter 尚未实现 Qwen3.8、W4A16、GDN 或 HTTP/SSE，因此不能把所有 bonus 视为本期默认交付，也不能把三套 lane 当成三条独立全栈项目。
+> 目标：三套方案描述不同的高分优化路径；它们共享同一个 correctness/service 底座，实际执行以“先 eligible、再按分/人时优化”为准。当前 starter 尚未实现 Qwen3.8、W4A16、GDN 或 HTTP/SSE，因此不能把所有 bonus 视为本期默认交付，也不能把三套方案当成三个独立全栈项目。
 
 > 执行入口：结合 `Agent4System-0820.pdf`、多卡实验环境和 2026-08-24/27 截止时间后的单主线执行方案见 [APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md](APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md)。本文件保留三条高分路线的技术比较；实际合入、分工和冻结以执行入口为准。
 
-> 协作裁决（2026-08-22 原始规划）：成员1维护唯一可回滚的模型/runtime eligibility 主线并负责最终集成；成员2拥有完整 protocol surface、stub、负控/恢复验收，以及 oracle 生成器/hidden 代理集证据；另设一条实验 lane 负责已正确 vertical slice 的 CUDA/benchmark/bonus 实验。代码准备可并行，但服务器真实 GPU/模型任务进入带锁队列；正式成绩只以 GPU0 的单卡重放为准。
-
-> **实际执行情况（2026-08-26 据 git 记录订正）**：本项目为两人团队，上述分工是 8/22 的事前规划，实际执行偏离较大。按 `git log` 统计：
+> **分工（据 git 记录，2026-08-26 订正）**：本项目为两人团队。
 >
 > | 成员 | 贡献占比 | 实际承担 |
 > |---|---:|---|
-> | **程仁龙**（`mygqdmmss`，成员1） | **约 95%** | 模型/runtime 主线、CUDA kernel、protocol surface、oracle 与 hidden 代理集、性能实验、显存账本、REPORT 与最终集成 |
-> | 王天民（`wang1145140503`，成员2） | 约 5% | 离线 benchmark 脚手架（shape inventory、experiment validator、campaign manifest 与交接记录） |
+> | **程仁龙**（`mygqdmmss`） | **约 95%** | 模型/runtime 主线、CUDA kernel、protocol surface、oracle 与 hidden 代理集、性能实验、显存账本、REPORT 与最终集成 |
+> | 王天民（`wang1145140503`） | 约 5% | 离线 benchmark 脚手架（shape inventory、experiment validator、campaign manifest 与交接记录，8/23 交付） |
 >
-> 即原规划中分派给成员2的 protocol surface、oracle 生成与 hidden 代理集，以及实验 lane 的 CUDA kernel 优化、benchmark campaign、显存账本与 REPORT，实际均由程仁龙完成；王天民的提交集中在 `scripts/campaign/` 与 `benchmarks/campaign/manifests/` 的离线脚手架，未进入服务/模型主线。
->
-> 因此本文与执行入口文档中所有"成员2"及实验 lane 的职责描述，**除上表列出的离线脚手架外，实际均由程仁龙承担**。保留原始分工文本是为了记录规划与执行的差异（这本身是提交材料要求的"设计变化及影响的执行阶段"），不代表实际分工。
+> 原规划的多人并行组织实际退化为程仁龙单人串行推进（该偏差记录于执行入口文档）。代码准备可并行，服务器真实 GPU/模型任务进入带锁队列；正式成绩只以 GPU0 的单卡重放为准。
 
 ---
 
@@ -29,9 +25,9 @@
 
 本任务不是三条独立全栈路线的等量三选一。三案共享一个必须从零建立的 correctness/service 底座；真正可执行的组织方式是“一条主线 + 两个受限优化 lane”。
 
-1. **方案一：成熟算子混合主线**。以 cuBLASLt/CUTLASS、FA2 和现有 ApxInf CUDA 能力为主，先补 W4A16、GDN 语义（逐 token eager 资格路径，再接 chunk-scan 性能路径）和 Qwen3.8 特殊 attention；协议 surface 由成员2独立完成并验收，成员1负责 runtime adapter/worker 集成。它不是“保底版”，而是两天内最现实的资格主线。
-2. **方案二：SM89 窄特化实验 lane**。只针对 M=1 packed-W4 GEMV、已正确的 GDN decode 融合和 CUDA Graph 做 A/B；不把 prefill offline autotune、persistent mega-kernel 当作前置条件。
-3. **方案三：状态/内存协同实验 lane**。优先 paged KV、C4/C8 和条件性 MTP；MTP 属于 base TPOT/C4 goodput 优化而非独立 bonus，先在 target decoder 冻结后做 K=1 feasibility probe；prefix state cache、262K/INT4 KV 默认砍掉，只有主线提前冻结且有合规证据才重开。
+1. **方案一：成熟算子混合主线**。以 cuBLASLt/CUTLASS、FA2 和现有 ApxInf CUDA 能力为主，先补 W4A16、GDN 语义（逐 token eager 资格路径，再接 chunk-scan 性能路径）和 Qwen3.8 特殊 attention；协议 surface 先独立完成并验收，再做 runtime adapter/worker 集成（均由程仁龙完成）。它不是“保底版”，而是两天内最现实的资格主线。
+2. **方案二：SM89 窄特化路径**。只针对 M=1 packed-W4 GEMV、已正确的 GDN decode 融合和 CUDA Graph 做 A/B；不把 prefill offline autotune、persistent mega-kernel 当作前置条件。
+3. **方案三：状态/内存协同路径**。优先 paged KV、C4/C8 和条件性 MTP；MTP 属于 base TPOT/C4 goodput 优化而非独立 bonus，先在 target decoder 冻结后做 K=1 feasibility probe；prefix state cache、262K/INT4 KV 默认砍掉，只有主线提前冻结且有合规证据才重开。
 
 130 分是自动榜理论上限，不是任一 lane 的统一硬门。评分器在 `eligible=false` 时把自动榜各项渲染为 `None`；多模态的独立算法不会挽救文本 eligibility。当前最优执行组织是方案一主线，方案二/三只吸收已通过门禁的局部成果，未通过的 bonus 明确报告为 0/unsupported，不阻塞文本提交。
 
@@ -110,16 +106,16 @@ clean-checkout 重放 + REPORT/PR 证据审计
 - 本地模型文件、公开 corpus hash、模型 revision 和所需 Python 依赖均已核验。
 - 当前 `transformers==4.57.0` 与 `vllm==0.11.0` 都没有原生 `Qwen3_5ForConditionalGeneration`/`qwen3_5` runtime（可见的相近实现是 `Qwen3Next*`）；因此 Qwen3Next 只能作为离线语义适配起点，不能未经逐层对拍就当作权威 oracle。oracle 交付必须包含 checkpoint-specific config 修补、W4 解包、GDN state、full-attention gate/partial-RoPE 和逐层 hidden/state/logit 对照。
 
-oracle 的执行边界：成员2在本地提交生成器、manifest/schema、synthetic W4 fixture 和
-选择性 layer/stage 参数；成员1在服务器 GPU1 logical lane 通过全局 lock 执行真实
-checkpoint，一次生成可审计的 hidden/state/logit golden。成员2不下载或展开完整模型，
-远程成员只消费 golden artifact 和 SHA256。完整 BF16 展开规模、显存峰值和实际可生成的
+oracle 的执行边界：生成器、manifest/schema、synthetic W4 fixture 和选择性
+layer/stage 参数先在本地准备；真实 checkpoint 由程仁龙在服务器 GPU1 logical lane
+通过全局 lock 执行，一次生成可审计的 hidden/state/logit golden。本地侧不下载或
+展开完整模型，只消费 golden artifact 和 SHA256。完整 BF16 展开规模、显存峰值和实际可生成的
 层集合以服务器 manifest 为准，不写成远程电脑的环境前置条件。
 
-服务器保留 raw oracle 产物和大 golden；远程成员若需要本地重放，只能消费成员1批准导出的
+服务器保留 raw oracle 产物和大 golden；本地重放只消费批准导出的
 最小 golden bundle（不含模型权重、私有 hidden 答案或凭据）。导出方式、文件清单和
 SHA256 写入 `docs/collaboration/templates/oracle-handoff.md`；没有批准的 bundle 时，
-远程成员只使用 manifest/schema/hash，不自行复制服务器目录。
+本地侧只使用 manifest/schema/hash，不自行复制服务器目录。
 
 ### 3.2 模型结构
 
@@ -143,7 +139,7 @@ SHA256 写入 `docs/collaboration/templates/oracle-handoff.md`；没有批准的
 
 ### 3.3 权重与显存预算
 
-本地 checkpoint 约 19.57 GiB。按 tensor 名称估算：语言主干约 13.19 GiB，embedding 约 2.37 GiB，lm_head 约 2.37 GiB，vision 约 0.86 GiB，MTP 约 0.79 GiB。纯文本常驻权重约 17.93 GiB；在 24564 MiB 显存上，CUDA context、workspace、FP32 GDN state、KV、临时 buffer 和碎片可用空间很紧。完整 BF16 展开规模只作为服务器 manifest 的预算事实，不是要求远程成员下载或运行的本地前置条件。
+本地 checkpoint 约 19.57 GiB。按 tensor 名称估算：语言主干约 13.19 GiB，embedding 约 2.37 GiB，lm_head 约 2.37 GiB，vision 约 0.86 GiB，MTP 约 0.79 GiB。纯文本常驻权重约 17.93 GiB；在 24564 MiB 显存上，CUDA context、workspace、FP32 GDN state、KV、临时 buffer 和碎片可用空间很紧。完整 BF16 展开规模只作为服务器 manifest 的预算事实，不是本地重放的前置条件。
 
 16 个 full-attention 层的 BF16 KV 约为：
 
@@ -202,7 +198,7 @@ roofline 账本：合同给出的冻结代理 54 GFLOP/token 在 16K prefill 约
 | `crates/apxinf-cuda/adapters/w4a16_adapter.cu` | W4A16 C ABI 与成熟/定制 kernel dispatch |
 | `crates/apxinf-cuda/adapters/qwen35_gdn_adapter.cu` | GDN causal conv 和 recurrent/chunk kernel C ABI |
 | `crates/apxinf-cuda/src/ffi/w4a16.rs`、`qwen35.rs` | 安全 Rust wrapper、shape/dtype/device 检查 |
-| `src/server.rs`、`src/server/*.rs` | Axum/Tokio 协议 surface、schema、SSE/JSON、admission、错误映射、stub、health 和恢复；真实 runtime adapter/worker 接入由成员1完成 |
+| `src/server.rs`、`src/server/*.rs` | Axum/Tokio 协议 surface、schema、SSE/JSON、admission、错误映射、stub、health 和恢复；真实 runtime adapter/worker 接入由程仁龙完成 |
 | `tests/qwen35_*`、`crates/apxinf-*/tests/qwen35_*` | loader、kernel、layer、trajectory、协议、并发和恢复回归 |
 | `scripts/qwen38_campaign.py` | 不改 evaluator 的实验编排、A/B 配对、环境和 hash 记录 |
 | `REPORT.md` | baseline、假设、结果、负实验、取舍、复现和回滚 |
@@ -237,7 +233,7 @@ roofline 账本：合同给出的冻结代理 54 GFLOP/token 在 16K prefill 约
 
 `POST /v1/evaluations/generate` 必须严格接收预分词 `input_ids`、`temperature=0` 和请求声明的 `stream`。每个 `input_ids` 必须是 JSON 整数、非负且落在 checkpoint `text_config.vocab_size` 范围内（加载到 runtime model config 后为 `vocab_size`；当前 revision 实测 `[0,248320)`）；不能用 tokenizer `vocab_size=248044` 作为 embedding 边界，因为 `image_token_id=248056` 仍是合法 model token；也不能只检查 `uint32` 而放过 `4294967295` 这类越界值。校验 `max_new_tokens` 为正整数，并同时满足 `prompt_tokens + max_new_tokens <= max_model_len` 与当前真实 device budget；`max_model_len` 是总 token admission 上限，不是只供 `/health` 展示的字段。`ignore_eos` 为布尔值，不能固定要求 128 或 `ignore_eos=true`。功能题通常是 `max_new_tokens=64, ignore_eos=false`，性能/轨迹/上下文/多请求题是 `max_new_tokens=128, ignore_eos=true`。服务从 checkpoint `generation_config.json` 核对 `eos_token_id=[248046,248044]`：前者遇到 EOS 立即停止，后者即使遇到 EOS 也继续到完整 budget。评测器只按跳过 special token 后的解码文本做 exact 比较，不单独检查 stop reason；这不意味着可以省略 EOS stop 逻辑，也不应把“EOS 必须作为 token event 发出”写成额外资格门。`stream=true` 时 SSE index 必须连续，终止事件包含 usage 和 `[DONE]`；`stream=false` 必须返回 HTTP 200 且 `type=result` 的 JSON，包含 `output_ids` 和 usage。两种模式的 usage 都与实际返回 token 数一致。
 
-协议资格 gate 由成员2对 stub 和真实服务分别执行：6 个可解析的结构化负控都用 `stream=false`；malformed JSON 以原始不可解析 body 发送。对 malformed JSON，当前 evaluator 的硬条件是 HTTP 400；对其余 6 个结构化负控（`input_ids=[]`、`[-1]`、`[4294967295]`、`temperature=0.1`、`max_new_tokens=health.max_model_len` 的 over-budget、`images:["x"]`），硬条件是 HTTP 400 且 JSON 含 `error`。实现可统一让 malformed JSON 也返回 JSON error，但不能把它误记成 scorer 的额外硬条件。随后必须通过 8-token 合法非流式请求（HTTP 200、`type=result`、一个 `output_ids`、usage 为 8+1），再检查 `/health.status=ok` 和合同 identity；任何负控污染、恢复失败或 identity 不符都使 `protocol_pass=false`。容量不足必须在 admission 阶段拒绝，不能先触发不可恢复 CUDA OOM。
+协议资格 gate 对 stub 和真实服务分别执行：6 个可解析的结构化负控都用 `stream=false`；malformed JSON 以原始不可解析 body 发送。对 malformed JSON，当前 evaluator 的硬条件是 HTTP 400；对其余 6 个结构化负控（`input_ids=[]`、`[-1]`、`[4294967295]`、`temperature=0.1`、`max_new_tokens=health.max_model_len` 的 over-budget、`images:["x"]`），硬条件是 HTTP 400 且 JSON 含 `error`。实现可统一让 malformed JSON 也返回 JSON error，但不能把它误记成 scorer 的额外硬条件。随后必须通过 8-token 合法非流式请求（HTTP 200、`type=result`、一个 `output_ids`、usage 为 8+1），再检查 `/health.status=ok` 和合同 identity；任何负控污染、恢复失败或 identity 不符都使 `protocol_pass=false`。容量不足必须在 admission 阶段拒绝，不能先触发不可恢复 CUDA OOM。
 
 协议清单是 eligibility gate，不是 PR review 的可选加分项。协议 owner 的原始证据必须逐项包含：`malformed_json`（原始不可解析 body，HTTP 400）、`empty_input_ids`、`negative_token_id`、`out_of_vocabulary_token_id`、`unsupported_temperature`、`over_budget`、`unsupported_modality_field`（后六项均为 `stream=false`、HTTP 400 + JSON `error`）、`valid_short_nostream_request`（8-token `stream=false` result）、`health_after_invalid_requests`，以及 `health_contract_identity`。这样 `/health.max_model_len` 同时被当作真实能力声明和 `prompt + output` 总预算上限。
 
@@ -317,7 +313,7 @@ APXINF_Q35_MULTIMODAL={0,1}
 
 - 建立 qwen35 文件夹、config/weight manifest 和 revision hard gate。
 - 写 packed W4 dequant reference、GDN 逐 token reference、full-attention reference。
-- 成员2先实现 `/health`、严格 generate SSE/JSON、请求级 `max_new_tokens`/`ignore_eos`、两个 EOS ID、错误 schema、admission 和 stub 恢复；成员1随后提供稳定 runtime adapter/worker 接口并完成真实模型接入。
+- 先实现 `/health`、严格 generate SSE/JSON、请求级 `max_new_tokens`/`ignore_eos`、两个 EOS ID、错误 schema、admission 和 stub 恢复；随后提供稳定 runtime adapter/worker 接口并完成真实模型接入（均由程仁龙完成）。
 - 门禁：loader tests 全部通过；7 项 protocol gate（malformed HTTP 400；其余 6 项 HTTP 400 + JSON `error`；8-token result；health recovery/identity）全部通过；公开 functional 6/6；显式覆盖 `64 + ignore_eos=false` 与 `128 + ignore_eos=true`；重复 reset token 一致。
 
 #### 阶段 M2：成熟 W4A16 与基础模型
@@ -371,11 +367,11 @@ APXINF_Q35_MULTIMODAL={0,1}
 
 ---
 
-## 6. 方案二：SM89 窄特化 decode 实验 lane
+## 6. 方案二：SM89 窄特化 decode 路径
 
 ### 6.1 路线定义
 
-该方案不是从零另建一套全模型 backend，而是挂在方案一的正确 vertical slice 之后的 SM89 窄特化实验 lane。它只针对 M=1 packed-W4 GEMV、已通过层级对齐的 GDN decode 融合和 CUDA Graph 做 A/B；prefill 继续以 BF16 scratch + cuBLASLt 为基线。所有 specialization 只依赖合法 shape、batch、dtype、硬件和运行状态，不按 case ID 或已知 token 特判。
+该方案不是从零另建一套全模型 backend，而是挂在方案一的正确 vertical slice 之后的 SM89 窄特化优化路径。它只针对 M=1 packed-W4 GEMV、已通过层级对齐的 GDN decode 融合和 CUDA Graph 做 A/B；prefill 继续以 BF16 scratch + cuBLASLt 为基线。所有 specialization 只依赖合法 shape、batch、dtype、硬件和运行状态，不按 case ID 或已知 token 特判。
 
 该路线追求在不破坏 eligibility 的前提下提高 TPOT 和 C4/C8 goodput；它不是中期或最终提交的前置条件。任何候选都必须能一键回到 mature anchor。
 
@@ -477,11 +473,11 @@ APXINF_Q35_MULTIMODAL={0,1}
 
 ---
 
-## 7. 方案三：状态、内存与调度实验 lane
+## 7. 方案三：状态、内存与调度路径
 
 ### 7.1 路线定义
 
-该方案是主线正确后才打开的状态/内存实验 lane，默认优先级为 paged KV、严格 admission、C4/C8 和条件性 MTP。prefix state cache 不是本期关键路径，默认关闭；只有主线提前冻结、课程规则允许、且 cold/hit A/B 证明合规和净收益时才单独实验。所有收益都必须来自真实模型状态复用或 target exact verification，并具备一键关闭和审计证据。
+该方案是主线正确后才打开的状态/内存优化路径，默认优先级为 paged KV、严格 admission、C4/C8 和条件性 MTP。prefix state cache 不是本期关键路径，默认关闭；只有主线提前冻结、课程规则允许、且 cold/hit A/B 证明合规和净收益时才单独实验。所有收益都必须来自真实模型状态复用或 target exact verification，并具备一键关闭和审计证据。
 
 缓存不能保存答案或输出 token；MTP 不能跳过 target model 校验。任何 cache/MTP 失败都不能影响 `BASE_GOOD` 的文字资格。
 
@@ -621,7 +617,7 @@ REPORT 和机器日志必须展示：
 
 ### 8.1 开启规则
 
-- 方案一始终是唯一主线：成员1在 GPU0 维护 `BASE_GOOD`、模型/runtime eligibility 和可回滚 forward；成员2维护独立 protocol surface 与 gate evidence，成员1只在 adapter 合同稳定后集成。
+- 方案一始终是唯一主线：程仁龙在 GPU0 维护 `BASE_GOOD`、模型/runtime eligibility 和可回滚 forward，protocol surface 与 gate evidence 独立维护，adapter 合同稳定后才集成。
 - 方案二只有在方案一的 eager/chunk vertical slice 已通过层级 correctness 后，才在 GPU2 做 B1 decode GEMV/graph A/B；任何 isolated kernel 结果都不能替代客户端端到端证据。
 - 方案三只有在文本 eligible、显存账本稳定后，才在 GPU3 先做 paged KV -> C4；target decoder 冻结后由 GPU2 先做 MTP K=1 probe，C8 与 vision 在隔离 lane 按各自门禁推进；prefix cache 默认关闭。
 - 最终组合可以吸收方案二的已证明 decode kernel 和方案三的已证明 paged KV/C4/MTP 组件，但不切换成另一套全栈架构；未通过能力明确标记为 0/unsupported。
@@ -813,6 +809,6 @@ python3 benchmarks/qwen38_4090/evaluation/test.py run \
 
 ## 12. 最终建议
 
-最终建议不是在三条全栈架构之间重新选边：成员1固定维护**方案一：成熟算子混合主线**，以 BF16 scratch + cuBLASLt prefill、packed-W4 decode GEMV、逐 token eager GDN 资格路径、chunk-scan 性能路径、正确的 full-attention gate/partial RoPE 和 runtime 集成为主；成员2独立交付严格 protocol surface、malformed 加六项结构化负控/合法请求/恢复证据；GPU2 只吸收方案二已证明的 decode GEMV/graph，GPU3 只吸收方案三已证明的 paged KV/C4/C8/MTP/vision 组件。这样保留三种技术路径的上限，同时把 correctness 风险集中在一个可回滚的 `BASE_GOOD` 上。
+最终建议不是在三条全栈架构之间重新选边：程仁龙固定维护**方案一：成熟算子混合主线**，以 BF16 scratch + cuBLASLt prefill、packed-W4 decode GEMV、逐 token eager GDN 资格路径、chunk-scan 性能路径、正确的 full-attention gate/partial RoPE 和 runtime 集成为主，并交付严格 protocol surface、malformed 加六项结构化负控/合法请求/恢复证据；GPU2 只吸收方案二已证明的 decode GEMV/graph，GPU3 只吸收方案三已证明的 paged KV/C4/C8/MTP/vision 组件。这样保留三种技术路径的上限，同时把 correctness 风险集中在一个可回滚的 `BASE_GOOD` 上。
 
 最终只提交有新鲜机器证据的能力声明：text eligibility 是硬门；context、C4/C8、multimodal、MTP 和 INT8/lm_head 等 bonus 各自 pass/0/unsupported。没有通过的 lane 不阻塞文本提交，也不能写入 `/health` 的 capability。
