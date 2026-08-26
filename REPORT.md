@@ -1,8 +1,22 @@
-# Qwen3.5 Bounded Prefill Report
+# ApxInf Qwen3.8-27B Single-GPU Inference Report
 
-Status: text-eligibility gates met and single-request performance optimized;
-multimodal groundwork started but not delivered. See "Submission Identity"
-for the authoritative commit.
+Status: text-eligibility gates met; single-request performance optimized
+(TTFT up to ~48x and TPOT ~2x over the eligibility baseline); multimodal
+bonus path implemented, verified end to end and delivered behind a single
+opt-in switch. See "Submission Identity" for the authoritative commit.
+
+Conventions used throughout:
+
+- `<model-dir>` — the approved `Qwen3.8-27B-AWQ-INT4` checkpoint directory
+  (revision pinned under "Identity").
+- `apxinf-evidence/...` and bare harness names (`apxinf-perf.py`,
+  `apxinf-soak.py`, `apxinf-protocol.py`, ...) — measurement clients and
+  their outputs, kept in the evidence archive that accompanies the
+  submission, outside the repository tree.
+- Naming: the checkpoint's product name is Qwen3.8; its `config.json`
+  declares HF architecture `Qwen3_5ForConditionalGeneration`
+  (`model_type: qwen3_5`), so module paths, test names and environment
+  flags use `qwen35`/`Q35`. Prose in this report says Qwen3.8.
 
 ## Submission Identity
 
@@ -22,10 +36,17 @@ for the authoritative commit.
 
 ## Identity
 
-- Model: `/mnt/chuangxin/team2/models/Qwen3.8-27B-AWQ-INT4`
+- Model: approved checkpoint `Qwen3.8-27B-AWQ-INT4`; its directory is cited as `<model-dir>` below
 - Checkpoint revision: `63768c10df38c0395e12ef49edac1bd539eaeeea`
 - Development/replay GPU: `GPU-343bc895-b011-22fa-4449-97207aa2bdec`
-- Service command: `target/debug/apxinf serve --model /mnt/chuangxin/team2/models/Qwen3.8-27B-AWQ-INT4 --revision 63768c10df38c0395e12ef49edac1bd539eaeeea --gpu-uuid GPU-343bc895-b011-22fa-4449-97207aa2bdec --bind 127.0.0.1:18080 --max-model-len 32768 --queue-capacity 1`
+- Final service command (release build; every accepted optimization is the
+  default): `target/release/apxinf serve --model <model-dir> --revision
+  63768c10df38c0395e12ef49edac1bd539eaeeea --gpu-uuid
+  GPU-343bc895-b011-22fa-4449-97207aa2bdec --bind 127.0.0.1:18080
+  --max-model-len 32768 --queue-capacity 1`. Prefix with
+  `APXINF_ENABLE_MULTIMODAL=1` for the multimodal configuration. Layer-1
+  evidence was gathered with the same arguments on the debug binary
+  (`target/debug/apxinf`), as recorded in the layer-1 sections.
 - CUDA toolkit: 12.8.93; driver: 580.82.07; Rust: 1.98.0
 - Contract SHA256: `520349b1279c3bf999a6848b296c23d20cdaeab7420934e9196c90018bac7433`
 - Model `config.json` SHA256: `fece2915d4c8ad4c10877622f04ea5e01cd3ae38768ce5c1edb700dd1de290f6`
@@ -37,17 +58,331 @@ for the authoritative commit.
   `03b2624ec788780a2915003cd2871c29c87dfb6f2a8d189ef3918662d6a1ed56`,
   `eb5ea1fbef28b13ac89158924ee7cfe7c9f111c79ae177b290c0abd45c38925c`.
 
+# Required Submission Materials
+
+The six required items, in the order of the review requirements, and where
+each is satisfied: (1) design changes and affected execution stages — next
+section; (2) `test.py check` / `test.py run` commands and results — in this
+part; (3) at least one negative control or regression test — in this part;
+(4) correctness/performance/stability/VRAM trade-offs — in this part;
+(5) known limitations, failed experiments and rollback — in this part;
+(6) baseline, hypotheses, implementation, measurement, results and
+reproduction steps — "Reproduction Steps" in this part plus the engineering
+record that follows it.
+
+## Design Changes and Affected Execution Stages
+
+The build progressed through three planned stages — layer 1 (text
+eligibility), layer 2 (single-request performance), layer 3 bonus
+(multimodal) — and every design change below is tied to a paired experiment
+or a fix section in the engineering record. "Stage affected" names the
+execution phase whose behaviour changed.
+
+| # | Design change | Stage affected | Record |
+|---|---|---|---|
+| 1 | Client-disconnect cancellation: prefill now checks a request-scoped cancellation token at every block boundary and releases the capacity slot; previously an abandoned request held the single slot until completion | service admission / recovery | "Client-Disconnect Capacity Leak" |
+| 2 | Measured configuration: debug binary with debug capture -> release binary, capture off | whole service | A/B 1, A/B 2 |
+| 3 | W4 prefill projections: per-element GEMV -> dequantize-once + tensor-core BF16 GEMM for >= 8 rows | prefill | A/B 4 |
+| 4 | W4 decode GEMV: one K element per thread -> one packed uint32 per thread (coalesced 128-byte transactions) | decode | A/B 5 |
+| 5 | Dequant scratch: per-call cudaMalloc/free -> resident per-size pool (~460 MiB) | prefill host-device interaction | A/B 7 |
+| 6 | Prefill block size: fixed 64 -> configurable chunk, default 512 text / 256 multimodal, charged at admission | prefill + admission | A/B 9, A/B 14, "VRAM budget fix" |
+| 7 | Attention prefill: per-(head, row) cuBLAS loop -> strided-batched GEMM, then query-head rebatch | attention prefill | A/B 6, A/B 16 |
+| 8 | Causal softmax: every thread scanning the full row -> row-cooperative block reduction | attention prefill | A/B 17 |
+| 9 | GDN status checks: kept eager per-op — the deferred variant measured zero gain and was rejected, i.e. the design deliberately did not change | decode / prefill | A/B 3 |
+| 10 | Multimodal: absent route (non-compliant 404) -> contract fail-closed 400 by default; full vision path + `POST /v1/chat/completions` behind `APXINF_ENABLE_MULTIMODAL=1` | new chat entry + prefill embedding scatter | "Multimodal Bonus Implementation" |
+
+Changes that were designed, measured and *not* adopted are part of the same
+record: see "Failed experiments" below.
+
+Organizationally, the original multi-lane plan (protocol lane, kernel lane,
+integration lane) collapsed to a single serial lane in execution; the
+GPU-lock queue and the single-designated-GPU formal replay discipline were
+kept throughout. The plan-versus-execution divergence is recorded in the two
+planning documents that accompany the submission.
+
+## `test.py check` and `test.py run`: Commands and Results
+
+### `test.py check` — passed
+
+```
+cd <worktree>
+python3 benchmarks/qwen38_4090/evaluation/test.py check
+```
+
+Result: `assignment checks passed`, exit code 0 — contract hashes, model
+files, public corpus hash, revision and Python dependencies all verified
+(captured log: `apxinf-evidence/submission/test-py-check.log`). The script's
+`--help` sweep over every evaluation program plus `cargo check --workspace
+--locked` also passed on the main repository checkout. Operational note:
+with the repository's default `target/` on the network volume the check ran
+more than 15 minutes without finishing (linker stuck in uninterruptible disk
+sleep); with `CARGO_TARGET_DIR` on local disk it completed in 45 s — the
+override changes where build artifacts are written, not what is checked.
+
+### `test.py run` — literal run blocked by a missing platform artifact; equivalent run completed and disclosed
+
+```
+python3 benchmarks/qwen38_4090/evaluation/test.py run \
+  --model-dir <model-dir> \
+  --base-url http://127.0.0.1:18080
+```
+
+The literal invocation cannot produce output on this host for a reason
+outside the implementation: the script passes no `--trajectory-reference`,
+and `run_evaluation.py` unconditionally raises `provide
+--trajectory-reference, or capture one from the vLLM control` before any
+artifact is written (raise at `run_evaluation.py:1461`; `raw.jsonl` /
+`submission.json` writes start at `:1588`). The platform's approved vLLM
+control artifact (schema `apxinf.qwen38_27b.trajectory_reference.v1`) is not
+present: a full search of the artifacts share and the repository checkout
+matched only the evaluator's own `__pycache__` bytecode.
+
+What was done instead, in two steps, both disclosed:
+
+1. Every workload `test.py run` would exercise was measured directly against
+   the running service with the frozen public corpus and is reported in the
+   engineering record: public functional 6/6 exact, the frozen 12-gate
+   protocol suite, the seven TTFT/TPOT cells (warmup 1 + measure 5), and the
+   mixed soaks.
+2. On 2026-08-27 the identical command line that `test.py run` builds was
+   executed once with one addition, `--capture-trajectory-reference`, solely
+   to prove the pipeline emits a complete artifact end to end (README §4:
+   public runs are local debugging only, not official results). Run
+   `20260826-155907-apxinf` (`benchmarks/qwen38_4090/evaluation/runs/`,
+   ~13 minutes, strict text-only release service on the designated GPU)
+   produced a complete `submission.json` (schema `leaderboard_submission.v1`,
+   profile `public_calibration` — 0 warmup / 1 repeat per cell by design):
+   `correctness.protocol_pass=true`, public cases **6/6**, all five
+   reliability booleans true with `request_success_rate` 1.0, TTFT 1K 1.88 s
+   / 2K 6.55 s / 4K 7.32 s / 8K 14.83 s / 16K 34.94 s, TPOT 67-77 ms, peak
+   VRAM 20,750-22,832 MiB, frozen contract (`520349b1...`) and
+   public-manifest (`1ec4f360...`) hashes embedded.
+
+Trajectory disclosure for step 2: `public_trajectory_tokens_passed=256/256`
+is self-comparison by construction — the reference was captured from the
+same run — and is **not** a score. The captured file is kept outside the
+repository (`apxinf-evidence/captured-trajectory-DEBUG-ONLY.json`) and is
+not an approved vLLM control. An earlier, pre-optimization evaluator attempt
+had been interrupted after more than 16 minutes on its first 8K case and is
+superseded by the run above.
+
+Consequences, stated plainly:
+
+- No official scorer artifact exists for this submission. Trajectory is
+  **unverified**; neither `eligible=true` nor any base score is claimed.
+- The `midterm_leaderboard` profile (1+5 repeats, official scoring) remains
+  a platform action with the platform's own reference artifact.
+- No evaluator, scorer, generator or contract file under
+  `benchmarks/qwen38_4090/evaluation/` was modified, and `submission.json`
+  image fields were not hand-filled.
+- The approved public dataset was consumed read-only from
+  `benchmarks/qwen38_4090/evaluation/.cache/public` (repository checkout);
+  its manifest SHA256 is
+  `1ec4f360e8dce8cb366251d9b92f8f91a393e5534bb93277a955f8b9e3e5e1e4`.
+
+## Reproduction Steps
+
+1. Build (locked, no fast-math): `cargo build --release --features
+   cuda-no-nvtx --locked --bin apxinf`.
+2. Start the strict single-GPU service — all accepted optimizations are the
+   defaults; startup to bound port is ~8 minutes on the release build
+   (checkpoint digest verification, weight load, warmup):
+   `target/release/apxinf serve --model <model-dir> --revision
+   63768c10df38c0395e12ef49edac1bd539eaeeea --gpu-uuid
+   GPU-343bc895-b011-22fa-4449-97207aa2bdec --bind 127.0.0.1:18080
+   --max-model-len 32768 --queue-capacity 1`. Prefix with
+   `APXINF_ENABLE_MULTIMODAL=1` for the multimodal configuration; serialize
+   real-GPU jobs behind the global GPU-job lock.
+3. Gates: the frozen protocol suite (`apxinf-protocol.py`, expected 12/12),
+   the six public functional cases, and the proxy hidden suite
+   (`apxinf-proxy-hidden-run.py`, expected >= 11/12, non-official).
+4. Performance: `apxinf-perf.py` — warmup 1 + measure 5 per cell, SSE-timed
+   TTFT/TPOT, produces the seven-cell table with CV and peak VRAM.
+5. Reliability: `apxinf-soak.py` — 200-request mixed plan with health
+   probes; expected 100% success and five true booleans.
+6. `python3 benchmarks/qwen38_4090/evaluation/test.py check` must print
+   `assignment checks passed`.
+
+## Negative Controls and Regression Tests
+
+The submission requirement asks for at least one negative control or
+regression test. The following are in the submitted tree and run in CI-style
+suites (`cargo test`), not by hand.
+
+**Protocol negative controls (7, all required to fail closed).** Executed
+against the live service by `apxinf-protocol.py`, 12/12 gates passing:
+`malformed_json` (raw unparseable body, HTTP 400), and six structured
+`stream=false` controls each requiring HTTP 400 with a JSON `error` —
+`empty_input_ids`, `negative_token_id`, `out_of_vocabulary_token_id`
+(`4294967295`), `unsupported_temperature` (`0.1`), `over_budget`
+(`max_new_tokens = health.max_model_len`), `unsupported_modality_field`
+(`images:["x"]`). Then `valid_short_nostream_request` (8 tokens, HTTP 200,
+`type=result`, usage 8/1/9), `health_after_invalid_requests`, and
+`health_contract_identity` — proving the negative controls do not poison the
+service.
+
+**Fault-injection regression for the client-disconnect capacity leak.** Three
+tests added after the defect was reproduced (see "Client-Disconnect Capacity
+Leak"): two drive a real `TcpListener`/`TcpStream` pair against a runtime that
+blocks until cancelled, disconnect mid-generation, and assert the runtime
+observed cancellation *while still working*; both fail on the pre-fix code
+(`Some(false)`) and pass after. The third cancels while the executor is inside
+`open()` and asserts the caller gets `Cancelled`, capacity returns to zero, and
+the next request succeeds.
+
+**Numerical regressions guarding every accepted optimization.** Each has a
+tested `=0` control path:
+
+- `qwen35_w4_cuda_prefill_gemm_matches_gemv_path_and_cpu_reference` — asserts
+  the dequantized weight matrix is **bit-identical** to the reference
+  decompression (`assert_eq!` over all weights, not a tolerance), then bounds
+  GEMM-vs-GEMV drift and checks sub-threshold row counts reproduce GEMV bytes
+  exactly.
+- `qwen35_w4_cuda_packed_gemv_matches_baseline_kernel_and_cpu_reference` and
+  `..._warp_gemv_...` — cover the non-multiple-of-8 K tail and the
+  out_features block tail.
+- `qwen35_w4_cuda_packed_gemv_rejects_non_finite_scale` and the warp variant —
+  NaN-scale must surface as a request error, not a silent result.
+- `batched_sdpa_prefill_matches_per_row_loop_at_checkpoint_shape` — **bit
+  equality** against the per-row loop at the real 24/4/256 head geometry with
+  a nonzero `kv_offset`.
+- `qwen35_gdn_cuda_deferred_status_matches_eager_and_latches_non_finite` —
+  bit-identical outputs, silent latching, drain error, latch clearing, and
+  eager restoration.
+- `qwen35_gdn_cuda_sequence_chunked_matches_eager_step_at_checkpoint_layout` —
+  chunked prefill vs eager recurrence at the real layout; re-run at 512 rows
+  when the prefill block size changed.
+- `prefill_chunk_override_is_clamped_to_the_workspace_bound` and
+  `prefill_plan_bounds_every_block_to_the_configured_chunk` — the chunk
+  override cannot exceed the workspace budget, and blocks always cover the
+  prompt contiguously.
+- `qwen35_gdn_cuda_convolution_commit_can_be_rolled_back` and the recurrent
+  equivalent — state rollback after an injected failure.
+
+**Suite status on the submitted tree (final, after the multimodal
+addition):** `apxinf-cuda` GPU suite 102 passed (2 pre-existing `fp8`
+environmental failures: cuBLAS status 15 / `CUBLAS_STATUS_NOT_SUPPORTED` on
+this driver, not on the Qwen3.8 path, unchanged baseline); `apxinf-model`
+qwen35 GPU suite 58 passed; CPU suites 98 (model lib) and 62 (bin, including
+the image/chat/template tests); `cargo fmt --all -- --check`,
+`cargo check --workspace --locked` and `git diff --check` clean.
+
+## Trade-offs: Correctness, Performance, Stability and VRAM
+
+The submission requirement asks for the trade-offs explicitly. Each was a
+decision with a measured cost, not a guess.
+
+**Trajectory (correctness soft target) traded for TTFT.** The W4 prefill
+dequant+GEMM change moved the frozen 128-token oracle prefix from 28 tokens to
+23 and later, with the packed GEMV, to 76. The mechanism is identical in all
+cases: the oracle's own top1/top2 margin is exactly 0.0 at generated tokens
+23, 28 and 76, so a different accumulation order resolves those ties the other
+way. No achievable tolerance fixes this, because the oracle has no margin
+there. Accepted because trajectory is a scored soft target with threshold 0.0
+while TTFT is 35 points, and because public functional stayed 6/6 exact at
+every step. Recorded rather than hidden.
+
+**NaN defence kept at per-request granularity, not weakened for speed.** The
+deferred-status experiment batched the per-op finite checks into one drain per
+token/block. It measured zero gain and was rejected, so the eager per-op check
+remains — the stricter option also turned out to be free.
+
+**VRAM traded for prefill throughput, with admission as the guard.** Raising
+the prefill block from 64 to 512 tokens scales the attention score workspace
+from 192 MB to 1536 MB (at `max_model_len=32768`), and the dequant scratch pool
+adds ~460 MB resident. Both are charged through `request_state_bytes` at
+admission, so an over-large configuration fails closed at startup instead of
+OOMing mid-request; `MAX_PREFILL_CHUNK_TOKENS` caps the override. Measured
+peak stayed at 19958 MiB of 24564 with ~3.8 GiB of headroom. This spend is
+also what puts the context bonus out of reach beyond 65536 — the trade was
+made knowingly in favour of the 35-point TTFT axis over a 3.33-point bonus.
+
+**Stability never traded.** Every accepted change was gated on protocol 12/12,
+public functional 6/6 and a clean soak before acceptance; the 200-request soak
+reached 100% success with all five reliability booleans true. Two candidates
+that were faster in isolation were still rejected for lack of end-to-end gain,
+and no change was accepted on kernel-level numbers alone.
+
+## Known Limitations, Failed Experiments and Rollback
+
+### Known limitations (final state)
+
+1. The frozen 128-token trajectory diverges from the approved oracle at BF16
+   tie sites — the oracle's own top1/top2 margins are exactly 0.0 at
+   generated tokens 23, 28 and 76, so sub-ulp accumulation-order drift
+   decides those steps. The final configuration matches a 76-token prefix
+   (82/128 overall; intermediate configurations ranged 23-28). No achievable
+   tolerance changes this, it does not block eligibility (trajectory
+   threshold is 0.0), and it caps only the trajectory soft score.
+2. `request_state_bytes` is a conservative admission estimate, not allocator
+   instrumentation with a measured peak-memory margin.
+3. KV append rollback on a failed request is achieved by dropping the failed
+   session; an in-place transaction rollback is not implemented.
+4. Multimodal: the official image suite is absent on this host, so "public
+   4/4" is a platform-run item (the self-built probes are disclosed as
+   non-official); out-of-contract image shapes are rejected with 400 rather
+   than resampled; the vision forward adds ~0.4 s per image with a ~30 ms
+   host-memory round-trip in the QKV split — functional, not tuned.
+5. Long-context bonus is capped by VRAM (65536 needs 4923 MiB against
+   4606 MiB free; 131072 is impossible even with INT8 KV), and C4/C8 needs a
+   continuous-batching scheduler that does not exist in this tree.
+
+An earlier blocker — no completed long-prompt service request — is resolved
+and kept only as history: the seven-cell campaigns completed every prompt
+length up to 16K with 5/5 success per cell, and the once-interrupted
+evaluator attempt is superseded by the completed calibration run recorded in
+the `test.py` section.
+
+The strict production path independently attests the selected CUDA device
+UUID, requires the frozen 64-layer Qwen3.8 contract, and streams SHA-256
+over the approved config, index and five safetensor payloads before model
+admission. Runtime errors map `WorkerStopped` to HTTP 503/unavailable, and
+recovery serializes through a poisoned mutex.
+
+### Failed experiments (kept in-tree as negative results)
+
+Eight of the seventeen paired experiments were rejected, each with data and
+root cause in its own section of the engineering record: deferred GDN status
+checks (A/B 3 — zero end-to-end gain: the synchronizations were off the
+critical path); warp-per-output GEMV (A/B 8 — <= 1.8%, inside noise);
+`uint4` vectorized loads (+26% slower); 4-accumulator array (+17% slower —
+dynamic indexing spilled the array to local memory); unrolled+fused
+accumulators (+1.3% — the apparent gain was a measurement artifact caught by
+running duplicate arms on separate GPUs); the per-group LUT design (rejected
+at design stage after the cost decomposition); Marlin-style bit-trick SIMD
+dequantization (A/B 15 — 54% slower, latency-bound, SASS-verified); and the
+initial chunk-512 caution (overturned by a recomputed budget, then adopted
+as A/B 14). Rejected kernel variants remain in the tree, default off and
+unreachable in production dispatch.
+
+### Rollback methods
+
+- Every accepted optimization is behind an environment flag with a tested
+  `=0`/off control: `APXINF_Q35_W4_PREFILL_GEMM`,
+  `APXINF_Q35_W4_PACKED_GEMV`, `APXINF_Q35_BATCHED_SDPA`,
+  `APXINF_Q35_SCRATCH_POOL`, `APXINF_Q35_PREFILL_CHUNK`,
+  `APXINF_Q35_ROWWISE_SOFTMAX`.
+- The multimodal path is a single opt-in switch: without
+  `APXINF_ENABLE_MULTIMODAL` the vision tower is not loaded, the prefill
+  chunk default stays 512, image requests fail closed with the contract 400,
+  and the service is the unchanged text-only submission.
+- Whole-tree rollback point (pre-integration HEAD):
+  `47ec280d2f88e8daf87750c0957e596e3a5390c1`.
+
+# Engineering Record: Baseline, Hypotheses, Implementation, Measurement, Results
+
 ## Implementation
 
-The Qwen3.5 runtime executes prompt prefill in contiguous blocks of at most 64
-tokens. Every block runs all 64 layers before the next block, carries GDN
+The Qwen3.8 runtime executes prompt prefill in contiguous blocks of at most
+`prefill_chunk_tokens()` tokens — default 512 (text-only) / 256 (multimodal);
+the original layer-1 design used 64, and the internal GDN scan chunk stays 64. Every block runs all 64 layers before the next block, carries GDN
 convolution/recurrent state and full-attention KV state across boundaries, uses
 absolute positions, allocates request KV capacity as `prompt_len + max_new_tokens`,
 and retains only the final block's last row for logits. Readiness now performs a
 prefill-plus-decode warmup before binding, fails closed while unhealthy, and
 serially attempts recovery from `/health`.
 
-## Verification
+## Verification (layer-1 phase)
 
 - `cargo test --bin apxinf -- --nocapture --test-threads=1`: 52 passed, 0 failed.
 - `cargo test -p apxinf-model --locked qwen35 -- --nocapture`: 54 passed, 0 failed, 2 ignored.
@@ -63,14 +398,19 @@ It verified two bounded prefill blocks, final position/KV length 65, request KV
 capacity 67, and one prefill plus one decode token. Artifact SHA256:
 `9a2c325f2254fd681b6de4c8e2b4d2b755aebfca0aba584ce2cb63bb1bb683b0`.
 
+These are the layer-1-phase suite counts; the final counts on the
+submitted tree (after layer 2 and the multimodal addition) are recorded
+under "Negative Controls and Regression Tests".
+
 ## Fresh Service Evidence
 
 Artifact directory:
-`/mnt/chuangxin/team2/artifacts/apxinf/midterm/20260825T164057Z-readiness-final`
+`20260825T164057Z-readiness-final` (midterm artifacts share)
 
 - `/health`: HTTP 200, `stub=false`, frozen revision and contract identity,
   `max_model_len=32768`, `parallel_requests=1`, `fallback_active=false`.
-- Frozen protocol gates: 10/10 passed. `protocol.json` SHA256:
+- Frozen protocol gates: 10/10 passed (the gate suite at that date; it later
+  grew to 12 gates). `protocol.json` SHA256:
   `562dec14609fa7508ea6194361c45cfc4d9ef81258ff96b48e605218da52ce2c`.
 - SSE request: HTTP 200, token prefix `[2037, 9]`, valid done usage and `[DONE]`.
 - Capacity rejection: prompt 1 plus `max_new_tokens=32768` returned structured HTTP
@@ -80,7 +420,7 @@ Artifact directory:
   `/health` and a successful short recovery request.
 - No Xid lines were observed in the captured kernel log window.
 - On shutdown, PID 1317001 exited, port 18080 was free, all GPUs returned to 1 MiB,
-  and `/tmp/apxinf-gpu-job.lock` was available.
+  and the global GPU-job lock was available.
 - Artifact manifest SHA256: `a4bbba80042bb282285b4d627c4b7372b194425fc9c8440177aba3533c66758a`.
 
 An additional hardening startup gate used the same strict service command. The
@@ -91,9 +431,81 @@ startup then independently reported CUDA UUID
 After interrupting PID 1353165, the port was free, the target GPU returned to 1 MiB,
 and the global GPU-job lock was available.
 
+## Client-Disconnect Capacity Leak (found and fixed 2026-08-25)
+
+### Reproduction (unfixed binary, real service)
+
+Procedure: start the strict service, open a raw socket, POST
+`longdoc-multihop-8192` (8192 prompt tokens, `max_new_tokens=128`,
+`stream=true`), close the socket after 2 s without reading any byte, then probe
+with 8-token `stream=false` requests every 2 s.
+
+Observed: 316 consecutive probes returned HTTP 503
+`{"error":{"message":"runtime capacity is exhausted","type":"capacity"}}` over
+653 s while `GET /health` stayed HTTP 200 the whole time. The first HTTP 200
+probe (`output_ids=[2037]`, usage 8/1/9) arrived only after the abandoned
+prefill had run to completion, matching the ~11 min 8K prefill cost. Evidence:
+`apxinf-evidence/a-disconnect/repro-broken.stdout`,
+`repro-broken-probes.json` (317 rows), `repro-serve.log`.
+
+### Root cause
+
+Cancellation was only observable at points the abandoned request never
+reached. `Qwen35CudaModel::open` ran the entire bounded-block prefill before
+returning a session, and the HTTP layer only learned about a disconnect from a
+failed socket *write*. For a streaming request no frame exists until prefill
+finishes, and for a non-streaming request nothing is written until the whole
+generation completes, so a client that disappears during prefill left the
+`RequestPermit` held for the full prefill duration. Every new request was
+correctly (per the admission contract) rejected with `Capacity`, and `/health`
+correctly stayed `ok`, so the service looked healthy while refusing all work.
+
+### Fix (minimal, three layers)
+
+1. `src/server/http.rs` spawns a disconnect monitor on a cloned socket for
+   every generate request. A read returning EOF or an error cancels a
+   request-scoped `CancellationToken` immediately, before any response byte
+   has to be written. The handler shuts the socket down on completion so the
+   monitor thread always exits.
+2. `src/server/service.rs` gained `handle_non_stream_with_cancel` and
+   `start_stream_with_cancel`, which thread that externally owned token into
+   `RuntimeRequest` instead of minting a fresh one. The existing
+   `handle_non_stream` / `start_stream` entry points remain as thin wrappers.
+3. `crates/apxinf-model/src/qwen35/runtime.rs` gained `open_with_cancel`,
+   which checks the token at every 64-token prefill block boundary and aborts
+   with a `prefill cancelled by client disconnect at token N of M` error. The
+   permit is released when the worker job unwinds. `open` remains as a
+   never-cancelled wrapper for tests and warmup.
+   `src/server/qwen35_runtime.rs` maps an abort observed under a cancelled
+   token to `RuntimeError::Cancelled` rather than `Execution`, so a disconnect
+   cannot mark the service unhealthy; the same rule covers the
+   session-channel-disconnect race in `next_token`.
+
+Cancellation granularity is therefore one prefill block (64 tokens) or one
+decode step, not one whole request.
+
+### Regression tests (added, GPU-free)
+
+- `server::http::tests::stream_disconnect_before_first_token_cancels_generation`
+- `server::http::tests::non_stream_disconnect_before_result_cancels_generation`
+  Both drive a real `TcpListener`/`TcpStream` pair with a runtime whose stream
+  blocks until cancelled, disconnect 50 ms in, and assert the runtime observed
+  cancellation *while still working*. Both fail on the pre-fix code
+  (`Some(false)`, i.e. the model ran to completion) and pass after it.
+- `server::qwen35_runtime::tests::cancelling_during_open_releases_capacity_and_maps_to_cancelled`
+  cancels while the executor is still inside `open`, and asserts the caller
+  gets `RuntimeError::Cancelled`, `active_requests()` returns to 0, and the
+  next request succeeds.
+
+`cargo test --bin apxinf`: 55 passed, 0 failed (52 before, 3 new).
+`cargo test -p apxinf-model --locked qwen35`: 54 passed, 2 ignored (unchanged).
+`cargo fmt --all -- --check`, `cargo check --workspace --locked`,
+`cargo build --features cuda-no-nvtx --locked --bin apxinf`, and
+`git diff --check` all pass.
+
 ## Verified Reliability Soak (2026-08-25, post-fix)
 
-Command: `python3 /tmp/apxinf-soak.py /tmp/apxinf-evidence/soak-fixed` against
+Command: `python3 apxinf-soak.py apxinf-evidence/soak-fixed` against
 the strict service on the designated GPU under `flock`. Plan: 200 sequential
 requests, seed 20260825 — 150 short (8-token prompt, 1-8 output tokens), 40
 medium (1024-token prompt, 4-16 output), 10 long (8192-token prompt, 4-8
@@ -104,7 +516,7 @@ prompt + completion`) checked.
 Result: **200/200 succeeded, success rate 1.0000, 0 failures** in 10184.9 s
 (2.83 h). Every health probe returned HTTP 200; the three final probes
 returned `status=ok` with `fallback_active=false`. Evidence:
-`/tmp/apxinf-evidence/soak-fixed/soak.json`, `soak-fixed.stdout`.
+`apxinf-evidence/soak-fixed/soak.json`, `soak-fixed.stdout`.
 
 Reliability booleans:
 
@@ -123,11 +535,11 @@ evidence: the service logged zero occurrences of `cuda error`, `CUDA_ERROR`,
 and `panic` across 3271 lines; GPU memory returned to the 19498 MiB resident
 weight baseline after the soak with no growth, and the other three GPUs stayed
 at 1 MiB throughout. Snapshots:
-`/tmp/apxinf-evidence/no-xid-indirect-midsoak.txt`,
+`apxinf-evidence/no-xid-indirect-midsoak.txt`,
 `no-xid-indirect-after-soak.txt`. This is stated as indirect, not as a direct
 kernel-log check.
 
-## Candidate vs Oracle Logits (task E)
+## Candidate vs Oracle Logits (frozen 128-token replay)
 
 The frozen non-stream request (`input_ids=[1..8]`, `max_new_tokens=128`,
 `temperature=0`, `ignore_eos=false`) was replayed against a freshly emptied
@@ -156,7 +568,7 @@ Pre-divergence drift never exceeds 3 BF16 ulp at the ~21 logit magnitude
 a single 1-ulp lift on token `3175` breaking an exactly-tied oracle logit pair;
 the post-divergence L-inf explosion is a *consequence* of the different token
 prefix, not evidence of a second defect. Evidence:
-`/tmp/apxinf-evidence/logits-compare.json`,
+`apxinf-evidence/logits-compare.json`,
 `logits-compare-summary.txt`.
 
 Because the oracle's own top1/top2 margin is 0.0 at that step, no achievable
@@ -188,21 +600,25 @@ The contract notes this FLOP proxy omits elementwise and recurrent work, so it
 is an order-of-magnitude screen and not an absolute physical floor.
 
 Measured prefill on this build is far above that floor: ~78 s at 1K and ~675 s
-at 8K (from the functional and soak evidence below), i.e. two to three orders
+at 8K (from the functional and soak evidence in this report), i.e. two to three orders
 of magnitude above the arithmetic screen. The consequence for scoring must be
 stated plainly: TTFT (35) and TPOT (25) are scored *relative to the best valid
 reference in the same round*, so passing `success 5/5` and `CV<=10%` earns cell
 **validity** — which is an eligibility requirement — but essentially none of
 the 60 dynamic points. The realistic ceiling for this build is Correctness 30 +
 Reliability 10, conditional on eligibility. No base-100 claim is made.
+*(This paragraph describes the layer-1 debug build it was written against;
+the layer-2 work below closes most of the distance — to ~4.8x off the
+arithmetic screen at 1K and ~3.3x off the decode bandwidth floor — while the
+no-dynamic-points expectation, unchanged in kind, is re-assessed there.)*
 
 `per_request_bytes` is sized from `max_model_len` (32768) rather than the
 actual prompt, so admission behaviour is prompt-length independent: an 8K
 request passing admission implies the 16K cell also passes.
 
-## Base Performance Cells (task C): 7/7 valid
+## Base Performance Cells (layer-1 baseline): 7/7 valid
 
-Command: `python3 /tmp/apxinf-perf.py /tmp/apxinf-evidence/perf-fixed` against
+Command: `python3 apxinf-perf.py apxinf-evidence/perf-fixed` against
 the strict debug-build service on the designated GPU under `flock`. Frozen
 public `text-perf-*` prompts, `max_new_tokens=128`, `ignore_eos=true`,
 `temperature=0`, `stream=true`; 1 warmup + 5 measured per cell; SSE consumed
@@ -224,7 +640,7 @@ VRAM never exceeds the resident-weight baseline of 19498 MiB — the KV and
 workspace for even the 16K cell fit inside allocator headroom already counted.
 The 16K cell's slowest repeat was 1663.6 s total against the 1800 s
 single-request timeout (~7.6% margin), as predicted. Evidence:
-`/tmp/apxinf-evidence/perf-fixed/perf.json`, `perf-fixed.stdout`.
+`apxinf-evidence/perf-fixed/perf.json`, `perf-fixed.stdout`.
 
 TTFT scales almost exactly linearly with prompt length (78 / 159 / 320 / 677 /
 1635 s for 1x/2x/4x/8x/16x), i.e. the quadratic attention term is not
@@ -237,29 +653,12 @@ As stated in the roofline section, these are *valid* cells but not
 competitive ones; the 60 dynamic TTFT/TPOT points are scored relative to the
 round's best reference and are not claimed.
 
-## Layer-1 Eligibility Summary (2026-08-26)
+## Proxy Hidden Suite: 11/12
 
-| Gate | Result |
-|---|---|
-| protocol gate | 12/12 passed |
-| public functional | 6/6 exact |
-| hidden ≥11/12 | proxy suite 11/12 (official hidden dataset unavailable) |
-| request success rate ≥99% | 200/200 = 100% |
-| 5 reliability booleans | all true (`no_xid` indirect) |
-| 7 TTFT/TPOT cells valid | 7/7, success 5/5 each, worst CV 3.47% |
-| trajectory (soft, threshold 0) | recorded; 30/128, diverges at step 28 |
-| official scorer artifact | unavailable — trajectory unverified, base 100 not claimed |
-
-Every layer-1 engineering gate that can be satisfied on this host is
-satisfied. The two open items are platform inputs, not work items: the
-official hidden dataset and an approved vLLM trajectory reference.
-
-## Proxy Hidden Suite (task D): 11/12
-
-Command: `python3 /tmp/apxinf-proxy-hidden-run.py /tmp/apxinf-proxy-hidden
-/tmp/apxinf-evidence/proxy-hidden` (12 independently seeded cases, explicitly
+Command: `python3 apxinf-proxy-hidden-run.py apxinf-proxy-hidden
+apxinf-evidence/proxy-hidden` (12 independently seeded cases, explicitly
 NOT the official hidden dataset; manifest with per-case SHA256 in
-`/tmp/apxinf-proxy-hidden/manifest.json`). SSE, `temperature=0`,
+`apxinf-proxy-hidden/manifest.json`). SSE, `temperature=0`,
 `max_new_tokens=64`, `ignore_eos=false`, tokenizer decode with
 `skip_special_tokens` and ascii strip, exact match.
 
@@ -268,7 +667,7 @@ Result: **11/12 passed** — meets the ≥11/12 eligibility floor, misses the
 (2K/8K), multi-hop (4K/8K), revision (2K/8K) and aggregate-1024 passed with
 correct EOS early termination. Timings scale near-linearly with prompt length
 (79.5 s at 1K, 323.3 s at 4K, ~680 s at 8K, 1638.4 s at 16K). Evidence:
-`/tmp/apxinf-evidence/proxy-hidden/proxy-hidden.json`.
+`apxinf-evidence/proxy-hidden/proxy-hidden.json`.
 
 Failure analysis for `proxy-aggregate-8192` (expected "223", got "164"): the
 case was replayed with per-step logits capture. The first generated token
@@ -280,9 +679,26 @@ model is confidently producing the wrong count on this 8K aggregation task,
 so this is a model-capability boundary, not an implementation-correctness
 defect; no code change is warranted. (A full offline-oracle replay of this
 prompt was not run; the margin evidence is the basis of this classification.)
-Evidence: `/tmp/apxinf-evidence/aggregate-8192-response.json`, service-log
+Evidence: `apxinf-evidence/aggregate-8192-response.json`, service-log
 margin lines in `serve log`, captured rows `service-logits-pos-000/8193/8194/
 8195.f32.bin`.
+
+## Layer-1 Eligibility Summary (2026-08-26)
+
+| Gate | Result |
+|---|---|
+| protocol gate | 12/12 passed |
+| public functional | 6/6 exact |
+| hidden ≥11/12 | proxy suite 11/12 (official hidden dataset unavailable) |
+| request success rate ≥99% | 200/200 = 100% |
+| 5 reliability booleans | all true (`no_xid` indirect) |
+| 7 TTFT/TPOT cells valid | 7/7, success 5/5 each, worst CV 3.47% |
+| trajectory (soft, threshold 0) | recorded; 30/128, diverges at step 28 (layer-1 state; layer-2 later improved it to 82/128, first divergence at step 76 — see A/B 5) |
+| official scorer artifact | unavailable — trajectory unverified, base 100 not claimed |
+
+Every layer-1 engineering gate that can be satisfied on this host is
+satisfied. The two open items are platform inputs, not work items: the
+official hidden dataset and an approved vLLM trajectory reference.
 
 ## Service Session Incident (infrastructure, not a service defect)
 
@@ -295,14 +711,128 @@ aborted. All evidence gathered before the kill (soak, proxy suite, logits
 capture, disconnect drills) is unaffected; the lock and port were released
 cleanly. The replacement service for the performance cells is started with
 `setsid`/`nohup`, fully detached from any agent session, logging directly to
-`/tmp/apxinf-evidence/serve-c-session.log`. One transient 503 was observed
+`apxinf-evidence/serve-c-session.log`. One transient 503 was observed
 when the diagnosis client raced the still-running previous request for the
 single capacity slot; that is the documented `queue-capacity=1` admission
 behaviour, not a regression.
 
+## Layer-2 Hypotheses as Formed at Layer-1 Close (historical record)
+
+This section was written before any layer-2 measurement and is kept in its
+original substance so the hypothesis-forming step stays auditable; each
+item's measured outcome is noted inline and recorded fully in the "Layer-2
+Paired A/B Results" sections that follow. At layer-1 close, all service evidence
+had been produced by `target/debug/apxinf` (cargo dev profile, unoptimized
+host code) with `APXINF_DEBUG_HIDDEN_DIR`/`APXINF_DEBUG_LOGITS_DIR` capture
+enabled, per the frozen session command. Three layer-2 candidates followed
+directly, ordered by expected yield per risk:
+
+1. Release build (`cargo build --release --features cuda-no-nvtx`): the plan's
+   own canonical command (§9.5) uses `--release`; host-side tensor/FFI/loop
+   code currently runs at `-O0`. Same source, same kernels, no fast-math, so
+   numerics are expected identical, but correctness smoke + frozen-request
+   regression still required before adoption. *(Outcome: accepted as A/B 1,
+   bit-identical, TPOT -18.3%.)*
+2. Drop debug capture env vars for measured runs: the logits capture writes
+   ~1 MB per step to the capture directory and one stderr line per generated
+   token. *(Outcome: accepted as A/B 2, TPOT -3.8%.)*
+3. Per-token logits D2H + host argmax: every decode step copies 248320 f32
+   (~1 MB) to host and scans it on CPU; a device argmax (plan M3) removes
+   both. *(Outcome: retired without implementation — the decode attribution
+   later measured this at 0.5% of TPOT, not a lever.)*
+
+These hypotheses were then tested by paired A/B; the layer-2 sections above
+supersede the debug-build numbers that were authoritative when this was
+written.
+
+Preparation already done without touching the GPU lane: `target/release/apxinf`
+is built (same source, `--features cuda-no-nvtx --locked`), and the CPU test
+suites pass identically under the release profile (bin 55/55; apxinf-model
+qwen35 54 passed / 2 ignored). Profilers available on this host: `ncu` and
+`nvprof`; `nsys` is absent, so launch-gap timelines will use `nvprof` GPU
+traces. A cheap profiling path is noted for layer 2: the existing
+single-layer GPU tests load one layer in ~14 s and can be wrapped by `ncu`
+directly, avoiding a full 20-minute service start per profile.
+
+16K timeout margin (measured 2026-08-25): `proxy-retrieval-16384-mid`
+completed its prefill in ~1630 s (1638.4 s total for 12 tokens). The 16K
+performance cell needs prefill + 128 decode tokens, i.e. ~1670 s against the
+1800 s single-request timeout — an ~8% margin. A single >10% slow repeat
+would invalidate that repeat; the perf harness persists results after every
+cell so a 16K failure cannot lose the other four TTFT cells.
+
+Static hot-path audit (code reading, no GPU): the dominant structural
+bottleneck candidate is host-device ping-pong, not kernel arithmetic. In
+`crates/apxinf-cuda/src/kernels/qwen35_gdn.rs`, `read_status()` performs a
+full `ctx.synchronize()` plus a device-to-host flag read, and it is called
+inside `causal_conv_silu` (line 263), `gated_delta_step` (418),
+`gated_rms_norm_bf16` (1003), their prefill variants (346, 804), and
+`require_finite_bf16` (46). Additionally every one of those calls allocates
+fresh `output`/`flags` (and sometimes `workspace`) buffers with `alloc_zeroed`
+(cudaMalloc + memset) instead of reusing request-scoped storage. Per decode
+token this multiplies out to roughly 4 full-stream synchronizations and ~6
+device allocations per GDN layer — ≈200 synchronizations and several hundred
+allocations across the 64 layers, before the per-token 248320-float logits
+D2H and host argmax. At the measured ~130 ms/token that is ~0.65 ms per
+synchronization+allocation pair, which matches the observed gap to the
+~20 ms/token bandwidth floor far better than any kernel-efficiency
+explanation. Prefill shares the same structure per 64-token block
+(~4 syncs x 48 GDN layers x 128 blocks ≈ 25k synchronizations for an 8K
+prompt).
+
+*(Outcome: half right. The allocation half was confirmed and fixed — the
+dequant scratch pool, A/B 7, delivered TTFT 3.46x at 1K. The synchronization
+half was refuted by A/B 3: the per-op synchronizations wait on kernels that
+are already executing, so removing ~200 of them per token measured zero
+gain.)*
+
+Layer-2 A/B queue, reordered by expected yield per risk (each item paired,
+single-variable, correctness-gated per plan §9.4):
+
+1. Batch the finite/status checks: keep the NaN defence but check once per
+   token (final hidden) or per prefill block instead of per layer per op, and
+   read flags without a mid-pipeline global synchronize (event/lazy read).
+   The contract requires NaN to surface as a request-level error; it does not
+   require a per-layer synchronous check. *(Outcome: rejected as A/B 3 —
+   zero measured gain.)*
+2. Reuse request-scoped output/flags/workspace buffers instead of
+   cudaMalloc/free per op. *(Outcome: realized as the dequant scratch pool,
+   A/B 7 — accepted, the largest single prefill win at that point.)*
+3. Release build swap (binary already built and CPU-suite-verified).
+   *(Outcome: accepted as A/B 1.)*
+4. Drop debug capture env vars for measured runs. *(Outcome: accepted as
+   A/B 2.)*
+5. Device argmax to remove the ~1 MB/token logits D2H + host scan.
+   *(Outcome: retired — measured at 0.5% of TPOT.)*
+
+Item 1 was implemented (2026-08-26) behind
+`APXINF_Q35_DEFERRED_STATUS=1`, default off:
+
+- `qwen35_gdn.rs`: a `StatusFlags` handle picks per call between the eager
+  path (fresh zeroed flags buffer, synchronous `read_status`, immediate
+  error — bit-for-bit the previous behaviour) and the deferred path (all ops
+  `atomicOr` into one resident per-device 4-byte latch, no allocation, no
+  synchronize, no read). New `drain_deferred_status()` synchronizes once,
+  raises any latched non-finite error, and clears the latch.
+- `runtime.rs` drains once per prefill block and once per decoded token, so
+  a non-finite value still fails the request (and the session is dropped as
+  before); only the detection point moves from per-op to per-token/block.
+  In deferred mode the per-op conv/recurrent rollback no longer triggers on
+  NaN — irrelevant in service, because a failed request always drops the
+  whole session.
+- Expected effect: decode goes from ~200 full-stream synchronizations + ~200
+  cudaMalloc per token to 1 synchronization; an 8K prefill from ~25k to 128.
+- Tests: new GPU test
+  `qwen35_gdn_cuda_deferred_status_matches_eager_and_latches_non_finite`
+  asserts bit-identical outputs vs eager, silent latching, drain error,
+  latch clearing, and eager restoration; it passed once the GPU lock freed,
+  and CPU suites re-passed (bin 55/55, model 54/54). The flag was then
+  measured as A/B 3 and rejected (no end-to-end gain); it stays in the tree
+  default-off as a documented negative result.
+
 ## Layer-2 Paired A/B Results
 
-A/B harness: `/tmp/apxinf-ab-probe.py` runs a correctness gate before any
+A/B harness: `apxinf-ab-probe.py` runs a correctness gate before any
 timing is trusted — the frozen 128-token request must reproduce the baseline
 `output_ids` SHA256 exactly, and public case `text-niah-1024-p50` must still
 match exactly — then measures `text-perf-1024` with 1 warmup + 3 repeats
@@ -329,7 +859,7 @@ within noise. The asymmetry is itself evidence for the static audit's
 conclusion: decode is dominated by host-side per-op overhead (which `-O2`
 shrinks), while prefill is dominated by device work per 64-token block (which
 the host optimizer cannot touch). Evidence:
-`/tmp/apxinf-evidence/ab/ab-release-debugcapture.json`.
+`apxinf-evidence/ab/ab-release-debugcapture.json`.
 
 ### A/B 2: debug capture off — ACCEPTED (small)
 
@@ -419,7 +949,7 @@ default threshold 8 rows):
   accumulation order alone; the test bounds GEMM-vs-GEMV drift at 0.0625 and
   verifies sub-threshold row counts reproduce the GEMV bytes exactly.
 - Suite status: `apxinf-cuda` 93 passed, 2 failed — the same two pre-existing
-  `fp8` failures (cuBLAS status 15, not on the Qwen3.5 path) as the baseline.
+  `fp8` failures (cuBLAS status 15, not on the Qwen3.8 path) as the baseline.
 
 An earlier version of this test failed on 1 of 264 outputs. The investigation
 is recorded because it changed the test rather than the code: GEMV-vs-CPU was
@@ -451,7 +981,8 @@ points, improves 3.89x. Decode is untouched by design (row counts below the
 threshold keep the GEMV kernel), and TPOT moves only within noise.
 
 The cost is the trajectory soft target: the frozen 128-token prefix drops from
-28 to 23 tokens. This is the *same* mechanism task E quantified, at the *same*
+28 to 23 tokens. This is the *same* mechanism the logits comparison above
+quantified, at the *same*
 sites: the oracle's top1/top2 margin is exactly 0.0 at steps 23, 28 and 76,
 and a different accumulation order resolves the step-23 tie the other way. The
 GEMV path happened to agree with the oracle at step 23 and lose at 28; the
@@ -473,7 +1004,7 @@ Seven-cell re-measurement with A/B 4 accepted (all valid, worst CV 6.25%):
 
 The 16K single-request wall time drops from ~1664 s to ~737 s, widening the
 1800 s timeout margin from ~8% to ~59%. Evidence:
-`/tmp/apxinf-evidence/perf-w4gemm/perf.json`.
+`apxinf-evidence/perf-w4gemm/perf.json`.
 
 ### A/B 5: bandwidth-oriented packed-W4 GEMV for decode — ACCEPTED
 
@@ -550,7 +1081,7 @@ tested `=0` rollback).
 
 Seven-cell measurement on the final configuration (all valid, success 5/5
 per cell, peak VRAM 19498 MiB throughout;
-`/tmp/apxinf-evidence/perf-final/perf.json`):
+`apxinf-evidence/perf-final/perf.json`):
 
 | Cell | TTFT median | TTFT CV | TPOT median | TPOT CV | vs layer-1 TTFT | vs layer-1 TPOT |
 |---|---:|---:|---:|---:|---:|---:|
@@ -568,12 +1099,12 @@ Verification chain on the final binary and flags, in order:
    packed-GEMV vs baseline vs CPU, NaN-scale rejection, threshold fallback),
    `qwen35_gdn` 21 passed, `batched_sdpa` bit-equality passed; full
    `apxinf-cuda` suite 93 passed with only the two pre-existing environmental
-   `fp8` failures (cuBLAS status 15, off the Qwen3.5 path).
+   `fp8` failures (cuBLAS status 15, off the Qwen3.8 path).
 2. CPU suites: bin 55/55, `apxinf-model` qwen35 54 passed / 2 ignored,
    `cargo fmt --check`, `cargo check --workspace --locked`,
    `git diff --check` all clean.
 3. Frozen protocol gate re-run against the final service: **12/12 passed**
-   (`/tmp/apxinf-evidence/protocol-final`, evidence SHA
+   (`apxinf-evidence/protocol-final`, evidence SHA
    `4695be18ddfc0f478e2d87444d859a0302644eef39d0c2e175e0765fe7c4e868`).
 4. Frozen 128-token request: bit-identical to the accepted packed-GEMV
    trajectory (76-token oracle prefix, 82/128 agreement — better than the
@@ -584,11 +1115,11 @@ Verification chain on the final binary and flags, in order:
 6. Short mixed soak on the final configuration: **58/58, success rate
    1.0000** (45 short + 12 x 1K + 1 x 8K, sequential, usage-checked), final
    health `ok` with `fallback_active=false`
-   (`/tmp/apxinf-evidence/short-soak-final.json`). The full 200-request soak
+   (`apxinf-evidence/short-soak-final.json`). The full 200-request soak
    remains the layer-1 record; a re-run on the final flags is recommended
    before any formal submission if time allows.
 7. Shutdown: service killed cleanly, port 18080 free, all four GPUs back to
-   1 MiB, `/tmp/apxinf-gpu-job.lock` free.
+   1 MiB, and the global GPU-job lock free.
 
 Cumulative layer-2 result vs the layer-1 baseline: TTFT 3.9x faster at 1K and
 2.3x at 16K; TPOT 2.0x faster at 1K and 1.5x at 16K; correctness gates
@@ -645,7 +1176,7 @@ Service-level results (GPU1, strict command):
 
 Verification on the pooled build: GPU suites on GPU0 (qwen35 33 passed,
 batched-sdpa bit-equality passed), protocol gate **12/12** on GPU1
-(`/tmp/apxinf-evidence/protocol-scratchpool`, SHA `fac93a75...`), short mixed
+(`apxinf-evidence/protocol-scratchpool`, SHA `fac93a75...`), short mixed
 soak **33/33 = 100%** (24 short + 8 x 1K + 1 x 8K) with final health `ok` /
 `fallback_active=false`, CPU suites and fmt/check/diff clean, and shutdown
 left the port free, all GPUs at 1 MiB, and the lock free.
@@ -1036,7 +1567,7 @@ environmental failures.
 
 Seven-cell campaign on this configuration — all valid, success 5/5 per cell,
 worst CV 8.1%, peak VRAM 19958 MiB throughout
-(`/tmp/apxinf-evidence/perf-rowwise/perf.json`):
+(`apxinf-evidence/perf-rowwise/perf.json`):
 
 | Cell | TTFT median | TTFT CV | TPOT median | TPOT CV |
 |---|---:|---:|---:|---:|
@@ -1069,7 +1600,7 @@ free, all four GPUs at 1 MiB, and the lock free.
 
 Seventeen paired single-variable experiments: nine accepted (release build,
 debug-capture off, W4 prefill dequant+GEMM, packed GEMV, batched SDPA, scratch
-pool, prefill chunk 256, prefill chunk 512, attention GEMM reshape,
+pool, prefill chunk 64 -> 512 (two measured steps), attention GEMM reshape,
 row-cooperative softmax), eight rejected with data and reasoning recorded.
 Correctness gates held at every step: protocol 12/12, public functional 6/6,
 soak 100%, and the trajectory soft target improved from 30/128 to 82/128
@@ -1150,8 +1681,8 @@ interpolation, 27 blocks, and the merger's
 `pos_embed.weight`, `merger.*`). The deepstack path, which this checkpoint does
 not use, is the main part that differs.
 
-Offline vision oracle generated (`/tmp/apxinf-vision-oracle`, script
-`/tmp/apxinf-vision-oracle.py`, run under the offline-only oracle venv —
+Offline vision oracle generated (`apxinf-vision-oracle`, script
+`apxinf-vision-oracle.py`, run under the offline-only oracle venv —
 Transformers is never in a serving path). On a deterministic 448x448 RGB PNG:
 
 - processor output `pixel_values` [784, 1536], `image_grid_thw` [[1, 28, 28]];
@@ -1166,12 +1697,14 @@ the CUDA implementation can be diffed stage by stage rather than only at the
 output.
 
 Remaining work for the multimodal bonus, in dependency order: port the vision
-forward to the Qwen3.5 config on CUDA and match the per-stage goldens; scatter
+forward to the Qwen3.8 config on CUDA and match the per-stage goldens; scatter
 the 196 embeddings onto `image_token_id` positions in the text embedding;
 implement `POST /v1/chat/completions` accepting one base64 PNG part plus one
 text part with `temperature=0`, `max_completion_tokens=32`, `stream=false`,
 `enable_thinking=false`; flip `capabilities.multimodal` only after public 4/4
-passes, keeping the current fail-closed behaviour until then.
+passes, keeping the current fail-closed behaviour until then. *(All of these
+steps were subsequently completed — see "Multimodal Bonus Implementation"
+below.)*
 
 ### Operational note: sandboxed client double-execution
 
@@ -1188,7 +1721,7 @@ output, which does not get re-executed.
 
 ## Multimodal Bonus Implementation (2026-08-26 evening session)
 
-Scope: the full Qwen3.5 vision path plus `POST /v1/chat/completions`, per
+Scope: the full Qwen3.8 vision path plus `POST /v1/chat/completions`, per
 `multimodal-contract-v1.json`. Out of scope and untouched: MTP/speculative
 decoding, prefix cache, C4/C8, long-context bonus, KV quantization.
 
@@ -1196,7 +1729,7 @@ decoding, prefix cache, C4/C8, long-context bonus, KV quantization.
 
 The official multimodal generator, public images, prompts and answers are
 **not present on this host**: a full search of `benchmarks/qwen38_4090/`,
-`/mnt/chuangxin/team2` and prior evidence directories finds the category
+the team share and prior evidence directories finds the category
 names and seed only inside `multimodal-contract-v1.json` itself, and
 `fetch_public_corpus.py` handles only the text corpus. The evaluator
 (`run_evaluation.py`, `score_multimodal.py`) consumes platform-generated
@@ -1228,7 +1761,7 @@ checkpoint + oracle dir) pins these bounds at ~2x measured.
 - `crates/apxinf-cuda`: new `vision_sdpa_bf16_wide_kernel` — the existing
   vision SDPA hardcoded head_dim 64 (2 elements/thread); the wide variant
   owns up to 4 strided elements per thread (any even head_dim <= 128,
-  Qwen3.5 vision is 72). At head_dim 64 it is **bit-identical** to the
+  Qwen3.8 vision is 72). At head_dim 64 it is **bit-identical** to the
   narrow kernel (`vision_sdpa_bf16_wide_bit_matches_narrow_kernel_at_head_dim_64`),
   and the dispatcher keeps the narrow kernel for 64 so the Qwen3-VL path is
   untouched. New `gelu_erf_bf16_kernel`: the patch merger uses PyTorch's
@@ -1260,7 +1793,7 @@ checkpoint + oracle dir) pins these bounds at ~2x measured.
 
 ### Self-built probe suite (local ground truth)
 
-`/tmp/apxinf-vision-e2e-gen.py` builds one 448x448 deterministic PNG per
+`apxinf-vision-e2e-gen.py` builds one 448x448 deterministic PNG per
 contract category — seven_segment_ocr ("382" on a dark seven-segment
 display), spatial_color (2x2 grid, top-left red), bar_arithmetic (two bars
 labeled 7 and 5, sum 12), object_count (5 circles) — plus, from the offline
@@ -1288,12 +1821,12 @@ resident 20454 MiB (19498 text + ~956 vision). `/health` reports
 
 | Check | Result |
 |---|---|
-| self-built image probes | **4/4 exact** — "382", "red", "12", "5"; 1.0-2.0 s per request end to end (`/tmp/apxinf-evidence/vision-e2e/vision-e2e.json`) |
-| frozen protocol gate | **12/12 passed** (`/tmp/apxinf-evidence/protocol-mm`, SHA `3e600e5b...`) |
-| public functional (text) | **6/6 exact** on the multimodal service; 8K longdoc cases ~24 s each at chunk 256 (`/tmp/apxinf-evidence/functional-mm/functional.json`) |
-| mixed text+image soak | **36/36** (18 short + 6 x 1K text + 12 image chats interleaved), success rate 1.0, healthy after (`/tmp/apxinf-evidence/mm-soak/mm-soak.json`) |
+| self-built image probes | **4/4 exact** — "382", "red", "12", "5"; 1.0-2.0 s per request end to end (`apxinf-evidence/vision-e2e/vision-e2e.json`) |
+| frozen protocol gate | **12/12 passed** (`apxinf-evidence/protocol-mm`, SHA `3e600e5b...`) |
+| public functional (text) | **6/6 exact** on the multimodal service; 8K longdoc cases ~24 s each at chunk 256 (`apxinf-evidence/functional-mm/functional.json`) |
+| mixed text+image soak | **36/36** (18 short + 6 x 1K text + 12 image chats interleaved), success rate 1.0, healthy after (`apxinf-evidence/mm-soak/mm-soak.json`) |
 | frozen 128-token text request on the multimodal service | output_ids SHA `20d981cb...` — **byte-identical** to the accepted layer-2 text configuration: the resident vision tower changes no text numerics |
-| peak VRAM during the run | 20914 MiB of 24564 (`/tmp/apxinf-evidence/mm-vram.txt`) |
+| peak VRAM during the run | 20914 MiB of 24564 (`apxinf-evidence/mm-vram.txt`) |
 
 ### Text-only (default) configuration re-verified after the change
 
@@ -1304,7 +1837,7 @@ contract's required unsupported behaviour — previously this path returned a
 non-compliant 404 because the route did not exist); the frozen 128-token
 request returns the same SHA `20d981cb...` (three-way byte equality:
 historical config, multimodal service, post-change default service); frozen
-protocol gate **12/12** (`/tmp/apxinf-evidence/protocol-textonly-after-mm`).
+protocol gate **12/12** (`apxinf-evidence/protocol-textonly-after-mm`).
 The vision tower is not loaded, resident memory and prefill chunk (512) are
 unchanged, so every layer-1/layer-2 performance number in this report still
 describes the text-only configuration.
@@ -1343,330 +1876,10 @@ temperature 0, `enable_thinking=false`, stream=false); (3) the vision
 forward adds ~0.4 s and the QKV column split currently round-trips through
 host memory (~30 ms per image) — functional, not tuned.
 
-## Unified Test Entry (`test.py`) Run (2026-08-27)
+# Appendix: Chronological Session Records
 
-The README's single test entry was exercised end to end now that the
-optimized service completes the public suite in minutes (the pre-optimization
-attempt had been interrupted after >16 minutes on the first 8K case).
-
-- `test.py run`'s literal invocation cannot produce output on this host: the
-  script passes no `--trajectory-reference`, and `run_evaluation.py`
-  unconditionally raises `provide --trajectory-reference, or capture one
-  from the vLLM control` *before* any artifact is written (raise at
-  run_evaluation.py:1461; `raw.jsonl`/`submission.json` writes start at
-  :1588). The platform's vLLM trajectory artifact is absent (re-verified:
-  `artifacts/apxinf/oracle/` holds only golden-generation payloads, no
-  `trajectory_reference.v1` document).
-- Therefore the **identical command line that `test.py run` builds** was
-  executed directly with one addition, `--capture-trajectory-reference`
-  (README §4: public runs are local debugging only, not official results).
-  Service: strict text-only release binary on the designated GPU under
-  `flock`.
-
-Result: run `20260826-155907-apxinf`
-(`benchmarks/qwen38_4090/evaluation/runs/`, ~13 minutes end to end) with a
-complete `submission.json` (schema `leaderboard_submission.v1`, profile
-`public_calibration` — 0 warmup / 1 repeat per cell by design):
-
-| Field | Value |
-|---|---|
-| `correctness.protocol_pass` | true |
-| `correctness.public_cases_passed` | **6/6** |
-| `reliability` | all five booleans true, `request_success_rate` 1.0 |
-| TTFT (single calibration repeat) | 1K 1.88 s, 2K 6.55 s, 4K 7.32 s, 8K 14.83 s, 16K 34.94 s |
-| TPOT | 67-77 ms across cells |
-| peak VRAM | 20,750-22,832 MiB |
-| `evidence.contract_sha256` | `520349b1...` (frozen contract) |
-| `evidence.public_manifest_sha256` | `1ec4f360...` (matches the approved public dataset) |
-
-**Trajectory disclosure**: `public_trajectory_tokens_passed = 256/256` is
-meaningless as a score — the reference was captured from this same run
-(self-comparison passes by construction) solely so the pipeline could emit a
-complete artifact. The captured file is kept outside the repository
-(`/tmp/apxinf-evidence/captured-trajectory-DEBUG-ONLY.json`), is not an
-approved `vLLM` control, and no trajectory result is claimed. The
-`midterm_leaderboard` profile (1+5 repeats, official scoring) remains a
-platform action with the platform's own reference artifact.
-
-`test.py check` **passed** ("assignment checks passed"): the script's
-`--help` sweep over all evaluation programs plus `cargo check --workspace
---locked` on the main repository checkout. Operational note: with the main
-repository's default `target/` on the network volume the same check ran
->15 minutes without finishing (linker in uninterruptible disk sleep); with
-`CARGO_TARGET_DIR` pointed at local disk it completed in 45 s. The
-environment override changes where build artifacts are written, not what is
-checked.
-
-## Layer-2 Performance Hypotheses (queued, not yet measured)
-
-All service evidence in this report was produced by `target/debug/apxinf`
-(cargo dev profile, unoptimized host code) with
-`APXINF_DEBUG_HIDDEN_DIR`/`APXINF_DEBUG_LOGITS_DIR` capture enabled, per the
-frozen session command. Three layer-2 candidates follow directly, ordered by
-expected yield per risk; none has been measured yet and none is claimed:
-
-1. Release build (`cargo build --release --features cuda-no-nvtx`): the plan's
-   own canonical command (§9.5) uses `--release`; host-side tensor/FFI/loop
-   code currently runs at `-O0`. Same source, same kernels, no fast-math, so
-   numerics are expected identical, but correctness smoke + frozen-request
-   regression still required before adoption.
-2. Drop debug capture env vars for measured runs: the logits capture writes
-   ~1 MB to /tmp and one stderr line per generated token.
-3. Per-token logits D2H + host argmax: every decode step copies 248320 f32
-   (~1 MB) to host and scans it on CPU; a device argmax (plan M3) removes both.
-
-These are hypotheses for paired A/B after layer 1 closes; the current
-debug-build numbers stay authoritative for this report until then.
-
-Preparation already done without touching the GPU lane: `target/release/apxinf`
-is built (same source, `--features cuda-no-nvtx --locked`), and the CPU test
-suites pass identically under the release profile (bin 55/55; apxinf-model
-qwen35 54 passed / 2 ignored). Profilers available on this host: `ncu` and
-`nvprof`; `nsys` is absent, so launch-gap timelines will use `nvprof` GPU
-traces. A cheap profiling path is noted for layer 2: the existing
-single-layer GPU tests load one layer in ~14 s and can be wrapped by `ncu`
-directly, avoiding a full 20-minute service start per profile.
-
-16K timeout margin (measured 2026-08-25): `proxy-retrieval-16384-mid`
-completed its prefill in ~1630 s (1638.4 s total for 12 tokens). The 16K
-performance cell needs prefill + 128 decode tokens, i.e. ~1670 s against the
-1800 s single-request timeout — an ~8% margin. A single >10% slow repeat
-would invalidate that repeat; the perf harness persists results after every
-cell so a 16K failure cannot lose the other four TTFT cells.
-
-Static hot-path audit (code reading, no GPU): the dominant structural
-bottleneck candidate is host-device ping-pong, not kernel arithmetic. In
-`crates/apxinf-cuda/src/kernels/qwen35_gdn.rs`, `read_status()` performs a
-full `ctx.synchronize()` plus a device-to-host flag read, and it is called
-inside `causal_conv_silu` (line 263), `gated_delta_step` (418),
-`gated_rms_norm_bf16` (1003), their prefill variants (346, 804), and
-`require_finite_bf16` (46). Additionally every one of those calls allocates
-fresh `output`/`flags` (and sometimes `workspace`) buffers with `alloc_zeroed`
-(cudaMalloc + memset) instead of reusing request-scoped storage. Per decode
-token this multiplies out to roughly 4 full-stream synchronizations and ~6
-device allocations per GDN layer — ≈200 synchronizations and several hundred
-allocations across the 64 layers, before the per-token 248320-float logits
-D2H and host argmax. At the measured ~130 ms/token that is ~0.65 ms per
-synchronization+allocation pair, which matches the observed gap to the
-~20 ms/token bandwidth floor far better than any kernel-efficiency
-explanation. Prefill shares the same structure per 64-token block
-(~4 syncs x 48 GDN layers x 128 blocks ≈ 25k synchronizations for an 8K
-prompt).
-
-Layer-2 A/B queue, reordered by expected yield per risk (each item paired,
-single-variable, correctness-gated per plan §9.4):
-
-1. Batch the finite/status checks: keep the NaN defence but check once per
-   token (final hidden) or per prefill block instead of per layer per op, and
-   read flags without a mid-pipeline global synchronize (event/lazy read).
-   The contract requires NaN to surface as a request-level error; it does not
-   require a per-layer synchronous check.
-2. Reuse request-scoped output/flags/workspace buffers instead of
-   cudaMalloc/free per op.
-3. Release build swap (binary already built and CPU-suite-verified).
-4. Drop debug capture env vars for measured runs.
-5. Device argmax to remove the ~1 MB/token logits D2H + host scan.
-
-Item 1 is implemented (2026-08-26, code staged, unmeasured) behind
-`APXINF_Q35_DEFERRED_STATUS=1`, default off:
-
-- `qwen35_gdn.rs`: a `StatusFlags` handle picks per call between the eager
-  path (fresh zeroed flags buffer, synchronous `read_status`, immediate
-  error — bit-for-bit the previous behaviour) and the deferred path (all ops
-  `atomicOr` into one resident per-device 4-byte latch, no allocation, no
-  synchronize, no read). New `drain_deferred_status()` synchronizes once,
-  raises any latched non-finite error, and clears the latch.
-- `runtime.rs` drains once per prefill block and once per decoded token, so
-  a non-finite value still fails the request (and the session is dropped as
-  before); only the detection point moves from per-op to per-token/block.
-  In deferred mode the per-op conv/recurrent rollback no longer triggers on
-  NaN — irrelevant in service, because a failed request always drops the
-  whole session.
-- Expected effect: decode goes from ~200 full-stream synchronizations + ~200
-  cudaMalloc per token to 1 synchronization; an 8K prefill from ~25k to 128.
-- Tests: new GPU test
-  `qwen35_gdn_cuda_deferred_status_matches_eager_and_latches_non_finite`
-  asserts bit-identical outputs vs eager, silent latching, drain error,
-  latch clearing, and eager restoration (queued to run when the GPU lock
-  frees). CPU suites re-pass (bin 55/55, model 54/54). Not yet measured;
-  the A/B order remains release-build first, then this flag.
-
-## Negative Controls and Regression Tests
-
-The submission requirement asks for at least one negative control or
-regression test. The following are in the submitted tree and run in CI-style
-suites (`cargo test`), not by hand.
-
-**Protocol negative controls (7, all required to fail closed).** Executed
-against the live service by `/tmp/apxinf-protocol.py`, 12/12 gates passing:
-`malformed_json` (raw unparseable body, HTTP 400), and six structured
-`stream=false` controls each requiring HTTP 400 with a JSON `error` —
-`empty_input_ids`, `negative_token_id`, `out_of_vocabulary_token_id`
-(`4294967295`), `unsupported_temperature` (`0.1`), `over_budget`
-(`max_new_tokens = health.max_model_len`), `unsupported_modality_field`
-(`images:["x"]`). Then `valid_short_nostream_request` (8 tokens, HTTP 200,
-`type=result`, usage 8/1/9), `health_after_invalid_requests`, and
-`health_contract_identity` — proving the negative controls do not poison the
-service.
-
-**Fault-injection regression for the client-disconnect capacity leak.** Three
-tests added after the defect was reproduced (see "Client-Disconnect Capacity
-Leak"): two drive a real `TcpListener`/`TcpStream` pair against a runtime that
-blocks until cancelled, disconnect mid-generation, and assert the runtime
-observed cancellation *while still working*; both fail on the pre-fix code
-(`Some(false)`) and pass after. The third cancels while the executor is inside
-`open()` and asserts the caller gets `Cancelled`, capacity returns to zero, and
-the next request succeeds.
-
-**Numerical regressions guarding every accepted optimization.** Each has a
-tested `=0` control path:
-
-- `qwen35_w4_cuda_prefill_gemm_matches_gemv_path_and_cpu_reference` — asserts
-  the dequantized weight matrix is **bit-identical** to the reference
-  decompression (`assert_eq!` over all weights, not a tolerance), then bounds
-  GEMM-vs-GEMV drift and checks sub-threshold row counts reproduce GEMV bytes
-  exactly.
-- `qwen35_w4_cuda_packed_gemv_matches_baseline_kernel_and_cpu_reference` and
-  `..._warp_gemv_...` — cover the non-multiple-of-8 K tail and the
-  out_features block tail.
-- `qwen35_w4_cuda_packed_gemv_rejects_non_finite_scale` and the warp variant —
-  NaN-scale must surface as a request error, not a silent result.
-- `batched_sdpa_prefill_matches_per_row_loop_at_checkpoint_shape` — **bit
-  equality** against the per-row loop at the real 24/4/256 head geometry with
-  a nonzero `kv_offset`.
-- `qwen35_gdn_cuda_deferred_status_matches_eager_and_latches_non_finite` —
-  bit-identical outputs, silent latching, drain error, latch clearing, and
-  eager restoration.
-- `qwen35_gdn_cuda_sequence_chunked_matches_eager_step_at_checkpoint_layout` —
-  chunked prefill vs eager recurrence at the real layout; re-run at 512 rows
-  when the prefill block size changed.
-- `prefill_chunk_override_is_clamped_to_the_workspace_bound` and
-  `prefill_plan_bounds_every_block_to_the_configured_chunk` — the chunk
-  override cannot exceed the workspace budget, and blocks always cover the
-  prompt contiguously.
-- `qwen35_gdn_cuda_convolution_commit_can_be_rolled_back` and the recurrent
-  equivalent — state rollback after an injected failure.
-
-**Suite status on the submitted tree:** `apxinf-cuda` 98 passed (2 pre-existing
-`fp8` environmental failures: cuBLAS status 15 / `CUBLAS_STATUS_NOT_SUPPORTED`
-on this driver, not on the Qwen3.5 path, unchanged from before this work);
-`apxinf` bin 55 passed; `apxinf-model` qwen35 55 passed / 2 ignored;
-`cargo fmt --all -- --check`, `cargo check --workspace --locked` and
-`git diff --check` clean.
-
-## Trade-offs: Correctness, Performance, Stability and VRAM
-
-The submission requirement asks for the trade-offs explicitly. Each was a
-decision with a measured cost, not a guess.
-
-**Trajectory (correctness soft target) traded for TTFT.** The W4 prefill
-dequant+GEMM change moved the frozen 128-token oracle prefix from 28 tokens to
-23 and later, with the packed GEMV, to 76. The mechanism is identical in all
-cases: the oracle's own top1/top2 margin is exactly 0.0 at generated tokens
-23, 28 and 76, so a different accumulation order resolves those ties the other
-way. No achievable tolerance fixes this, because the oracle has no margin
-there. Accepted because trajectory is a scored soft target with threshold 0.0
-while TTFT is 35 points, and because public functional stayed 6/6 exact at
-every step. Recorded rather than hidden.
-
-**NaN defence kept at per-request granularity, not weakened for speed.** The
-deferred-status experiment batched the per-op finite checks into one drain per
-token/block. It measured zero gain and was rejected, so the eager per-op check
-remains — the stricter option also turned out to be free.
-
-**VRAM traded for prefill throughput, with admission as the guard.** Raising
-the prefill block from 64 to 512 tokens scales the attention score workspace
-from 192 MB to 1536 MB (at `max_model_len=32768`), and the dequant scratch pool
-adds ~460 MB resident. Both are charged through `request_state_bytes` at
-admission, so an over-large configuration fails closed at startup instead of
-OOMing mid-request; `MAX_PREFILL_CHUNK_TOKENS` caps the override. Measured
-peak stayed at 19958 MiB of 24564 with ~3.8 GiB of headroom. This spend is
-also what puts the context bonus out of reach beyond 65536 — the trade was
-made knowingly in favour of the 35-point TTFT axis over a 3.33-point bonus.
-
-**Stability never traded.** Every accepted change was gated on protocol 12/12,
-public functional 6/6 and a clean soak before acceptance; the 200-request soak
-reached 100% success with all five reliability booleans true. Two candidates
-that were faster in isolation were still rejected for lack of end-to-end gain,
-and no change was accepted on kernel-level numbers alone.
-
-## Required Submission Commands: `test.py check` and `test.py run`
-
-### `test.py check` — passed
-
-```
-cd <worktree>
-python3 benchmarks/qwen38_4090/evaluation/test.py check
-```
-
-Result: `assignment checks passed`, exit code 0 (contract hashes, model files,
-public corpus hash, revision and Python dependencies all verified). Captured
-log: `/tmp/apxinf-evidence/submission/test-py-check.log`.
-
-### `test.py run` — cannot complete, and why
-
-```
-python3 benchmarks/qwen38_4090/evaluation/test.py run \
-  --model-dir /mnt/chuangxin/team2/models/Qwen3.8-27B-AWQ-INT4 \
-  --base-url http://127.0.0.1:18080
-```
-
-This command cannot produce a scored artifact on this host, for a reason
-outside the implementation: `run_evaluation.py` requires either an approved
-`--trajectory-reference` (schema `apxinf.qwen38_27b.trajectory_reference.v1`,
-produced from the platform's vLLM control) or `--capture-trajectory-reference`,
-and raises `provide --trajectory-reference, or capture one from the vLLM
-control` when given neither (`run_evaluation.py:1456-1461`). A full search of
-`/mnt/chuangxin/team2/artifacts` and `/mnt/chuangxin/team2/ApxInf` for that
-schema matched only the evaluator's own `__pycache__`, so the artifact is not
-present.
-
-`--capture-trajectory-reference` would make this candidate its own oracle,
-which is self-scoring, so it was deliberately **not** used. No evaluator,
-scorer, generator or contract file was modified.
-
-The workload `test.py run` would exercise was therefore measured directly
-against the running service with the frozen public corpus, and every number in
-this report comes from those runs: public functional 6/6 exact, the frozen
-12-gate protocol suite, the seven TTFT/TPOT cells with warmup 1 + measure 5,
-and mixed soaks. What is **not** claimed: any scorer verdict, `eligible=true`,
-a trajectory score, or a base score of 100.
-
-## Official Scorer Status (trajectory unverified)
-
-`run_evaluation.py` requires either `--trajectory-reference` (an approved
-`apxinf.qwen38_27b.trajectory_reference.v1` artifact) or
-`--capture-trajectory-reference`; with neither it raises
-`provide --trajectory-reference, or capture one from the vLLM control`
-(`run_evaluation.py:1456-1461`). The platform's vLLM control artifact is not
-present on this host: a full search of `/mnt/chuangxin/team2/artifacts` and
-`/mnt/chuangxin/team2/ApxInf` for the schema string matched only the
-evaluator's own `__pycache__` bytecode, and no file matching `*trajectory*`
-exists outside the evaluator itself.
-
-`--capture-trajectory-reference` would make this candidate its own oracle,
-which is self-scoring and was therefore **not** used. Consequently:
-
-- No official evaluator/scorer artifact exists for this run.
-- Trajectory is reported as **unverified**, not as a score.
-- A base score of 100 cannot be claimed. Correctness/TTFT/TPOT/Reliability
-  evidence in this report is self-measured with the frozen public corpus and
-  the approved offline oracle; it is not a scorer verdict.
-- No evaluator, scorer, generator, or contract file under
-  `benchmarks/qwen38_4090/evaluation/` was modified.
-
-## Evaluator Scope
-
-The approved public dataset was available at
-`/mnt/chuangxin/team2/ApxInf/benchmarks/qwen38_4090/evaluation/.cache/public`.
-Its manifest SHA256 is
-`1ec4f360e8dce8cb366251d9b92f8f91a393e5534bb93277a955f8b9e3e5e1e4`.
-The official evaluator was started against the six public functional cases, but
-the first 8K-class request produced no completed row after more than 16 minutes
-and was interrupted for cleanup. No functional score is claimed. Hidden evaluation
-was unavailable. The required approved `--trajectory-reference` was unavailable;
-the candidate was not used as its own oracle, and no trajectory score is reported.
-No evaluator or scorer files were modified.
+Retained as the audit trail of how the result was reached; numbers
+superseded by later sections are marked where they occur.
 
 ## Frozen 128-Token Oracle Audit
 
@@ -1676,7 +1889,7 @@ materializing FP32 `k_beta` and `v_beta`, the frozen non-stream request
 `input_ids=[1,2,3,4,5,6,7,8]`, `max_new_tokens=128`, `temperature=0.0`
 matched the stored reference for 76 tokens. The first divergence was token 76:
 candidate `2972`, reference `9493`; 46 of 128 positions differed. Candidate
-artifact: `/tmp/apxinf-oracle-128-after-materialized-beta.json`.
+artifact: `apxinf-oracle-128-after-materialized-beta.json`.
 
 A deterministic CUDA regression at the checkpoint's real `key_dim=128` now
 passes bit-exact BF16 output and strict FP32 recurrent-state samples. The
@@ -1723,10 +1936,10 @@ Trajectory rate is a scored soft target (threshold 0.0 for eligibility).
 
 ## Fresh Session Evidence (2026-08-25 evening)
 
-Service command (strict): `flock -n /tmp/apxinf-gpu-job.lock env
+Service command (strict): `flock -n <gpu-job-lock> env
 CUDA_VISIBLE_DEVICES=GPU-343bc895-b011-22fa-4449-97207aa2bdec
-APXINF_DEBUG_HIDDEN_DIR=/tmp/apxinf-debug-hidden-2 target/debug/apxinf serve
---model /mnt/chuangxin/team2/models/Qwen3.8-27B-AWQ-INT4 --revision
+APXINF_DEBUG_HIDDEN_DIR=<capture-dir> target/debug/apxinf serve
+--model <model-dir> --revision
 63768c10df38c0395e12ef49edac1bd539eaeeea --gpu-uuid
 GPU-343bc895-b011-22fa-4449-97207aa2bdec --bind 127.0.0.1:18080
 --max-model-len 32768 --queue-capacity 1`. Startup to bound port took ~19.5
@@ -1739,7 +1952,7 @@ Focused tests (this session, designated GPU under flock):
 `qwen35_gdn` suite 19 passed / 1 ignored (timing probe); full `apxinf-cuda`
 suite 90 passed with 2 pre-existing failures in `fp8` (cuBLAS status 15,
 CUBLAS_STATUS_NOT_SUPPORTED on this driver/hardware; FP8 is not on the
-Qwen3.5 text path and is untouched by the staged diff); `apxinf` bin tests 52
+Qwen3.8 text path and is untouched by the staged diff); `apxinf` bin tests 52
 passed; `apxinf-model qwen35` 54 passed / 2 ignored; ignored oracle test
 `real_layer_zero_prefill_first_row_matches_oracle_hidden` passed in 13.6 s.
 `cargo check --workspace --locked`, `cargo build --features cuda-no-nvtx
@@ -1752,7 +1965,7 @@ ascii strip, tokenizer decode with skip_special_tokens): 6/6 passed.
 `longdoc-multihop-8192` 9 tokens (678.6 s), `longdoc-revision-8192` 9 tokens
 (678.3 s), `longdoc-aggregate-8192` 3 tokens (681.2 s). EOS stopping is
 demonstrated by these early terminations under `ignore_eos=false`. Evidence:
-`/tmp/apxinf-functional-fresh/functional.json`.
+`apxinf-functional-fresh/functional.json`.
 
 Protocol gate: 12/12 passed (7 negative controls all HTTP 400 with JSON
 `error`; `valid_short_nostream_request` HTTP 200 `type=result` one token
@@ -1760,7 +1973,7 @@ Protocol gate: 12/12 passed (7 negative controls all HTTP 400 with JSON
 `health_contract_identity` HTTP 200 with
 `apxinf.qwen38_27b.inference_interface.v1`; SSE 8-token stream with
 contiguous indexes 0-7, single request_id, done usage 8/8/16, `[DONE]`).
-Evidence: `/tmp/apxinf-protocol-fresh/protocol.json` SHA256
+Evidence: `apxinf-protocol-fresh/protocol.json` SHA256
 `3cbd8c0389112eafc854256c85647ac67d9c52d4295e85c05d20ec3d2c2da5ba`.
 
 Client disconnect during SSE: connection aborted mid-stream; afterwards
@@ -1776,100 +1989,5 @@ Reliability soak (2026-08-25 evening, first attempt): invalidated. The 200
 sequential mixed requests all failed in 0.2 s with HTTP 503
 `runtime capacity is exhausted` because the immediately preceding functional
 client had been killed during an 8K `longdoc` request; the abandoned request
-kept the single capacity slot. See the next section for the root cause,
+kept the single capacity slot. See "Client-Disconnect Capacity Leak" in the engineering record for the root cause,
 regression tests, and fix.
-
-## Client-Disconnect Capacity Leak (found and fixed 2026-08-25)
-
-### Reproduction (unfixed binary, real service)
-
-Procedure: start the strict service, open a raw socket, POST
-`longdoc-multihop-8192` (8192 prompt tokens, `max_new_tokens=128`,
-`stream=true`), close the socket after 2 s without reading any byte, then probe
-with 8-token `stream=false` requests every 2 s.
-
-Observed: 316 consecutive probes returned HTTP 503
-`{"error":{"message":"runtime capacity is exhausted","type":"capacity"}}` over
-653 s while `GET /health` stayed HTTP 200 the whole time. The first HTTP 200
-probe (`output_ids=[2037]`, usage 8/1/9) arrived only after the abandoned
-prefill had run to completion, matching the ~11 min 8K prefill cost. Evidence:
-`/tmp/apxinf-evidence/a-disconnect/repro-broken.stdout`,
-`repro-broken-probes.json` (317 rows), `repro-serve.log`.
-
-### Root cause
-
-Cancellation was only observable at points the abandoned request never
-reached. `Qwen35CudaModel::open` ran the entire bounded-block prefill before
-returning a session, and the HTTP layer only learned about a disconnect from a
-failed socket *write*. For a streaming request no frame exists until prefill
-finishes, and for a non-streaming request nothing is written until the whole
-generation completes, so a client that disappears during prefill left the
-`RequestPermit` held for the full prefill duration. Every new request was
-correctly (per the admission contract) rejected with `Capacity`, and `/health`
-correctly stayed `ok`, so the service looked healthy while refusing all work.
-
-### Fix (minimal, three layers)
-
-1. `src/server/http.rs` spawns a disconnect monitor on a cloned socket for
-   every generate request. A read returning EOF or an error cancels a
-   request-scoped `CancellationToken` immediately, before any response byte
-   has to be written. The handler shuts the socket down on completion so the
-   monitor thread always exits.
-2. `src/server/service.rs` gained `handle_non_stream_with_cancel` and
-   `start_stream_with_cancel`, which thread that externally owned token into
-   `RuntimeRequest` instead of minting a fresh one. The existing
-   `handle_non_stream` / `start_stream` entry points remain as thin wrappers.
-3. `crates/apxinf-model/src/qwen35/runtime.rs` gained `open_with_cancel`,
-   which checks the token at every 64-token prefill block boundary and aborts
-   with a `prefill cancelled by client disconnect at token N of M` error. The
-   permit is released when the worker job unwinds. `open` remains as a
-   never-cancelled wrapper for tests and warmup.
-   `src/server/qwen35_runtime.rs` maps an abort observed under a cancelled
-   token to `RuntimeError::Cancelled` rather than `Execution`, so a disconnect
-   cannot mark the service unhealthy; the same rule covers the
-   session-channel-disconnect race in `next_token`.
-
-Cancellation granularity is therefore one prefill block (64 tokens) or one
-decode step, not one whole request.
-
-### Regression tests (added, GPU-free)
-
-- `server::http::tests::stream_disconnect_before_first_token_cancels_generation`
-- `server::http::tests::non_stream_disconnect_before_result_cancels_generation`
-  Both drive a real `TcpListener`/`TcpStream` pair with a runtime whose stream
-  blocks until cancelled, disconnect 50 ms in, and assert the runtime observed
-  cancellation *while still working*. Both fail on the pre-fix code
-  (`Some(false)`, i.e. the model ran to completion) and pass after it.
-- `server::qwen35_runtime::tests::cancelling_during_open_releases_capacity_and_maps_to_cancelled`
-  cancels while the executor is still inside `open`, and asserts the caller
-  gets `RuntimeError::Cancelled`, `active_requests()` returns to 0, and the
-  next request succeeds.
-
-`cargo test --bin apxinf`: 55 passed, 0 failed (52 before, 3 new).
-`cargo test -p apxinf-model --locked qwen35`: 54 passed, 2 ignored (unchanged).
-`cargo fmt --all -- --check`, `cargo check --workspace --locked`,
-`cargo build --features cuda-no-nvtx --locked --bin apxinf`, and
-`git diff --check` all pass.
-
-## Known Release Blockers
-
-1. The frozen 128-token trajectory now diverges from the approved oracle at
-   token 28 with the staged cuBLAS implementation (the pre-staging build
-   reached 76 tokens). The divergence is traced to sub-ulp BF16 drift flipping
-   exact logit ties (oracle margins 0.0 at tokens 23/28/76). It does not block
-   eligibility (trajectory threshold is 0.0) but caps the trajectory score.
-2. `request_state_bytes` is a conservative estimate, not allocator instrumentation
-   with a measured peak-memory margin.
-3. KV append rollback on a failed request is achieved by dropping the failed
-   session; an in-place transaction rollback is not implemented.
-4. No successful 1024/8192/32768-token service request was completed in this run;
-   the 65-token cross-block request is the long-prompt evidence. The evaluator's
-   interrupted 8K attempt is not a pass.
-
-The strict production path now independently attests the selected CUDA device UUID,
-requires the frozen 64-layer Qwen3.5 contract, and streams SHA-256 over the approved
-config, index, and five safetensor payloads before model admission. Runtime errors
-map `WorkerStopped` to HTTP 503/unavailable, and recovery continues to serialize
-through a poisoned mutex. These are no longer release blockers.
-
-Rollback point: `47ec280d2f88e8daf87750c0957e596e3a5390c1` (pre-integration HEAD).
