@@ -7,6 +7,7 @@
 #include <cuda_fp8.h>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 
 #define BLOCK_SIZE 256
 
@@ -362,6 +363,22 @@ extern "C" cudaError_t apxinf_attention_softmax_bf16(
     const void* scores, void* output,
     uint32_t cols, uint32_t rows, uint32_t kv_offset, uint32_t n_heads, void* stream)
 {
+    // Row-cooperative kernel by default: one block per row, threads split the
+    // row instead of every thread rescanning it. `APXINF_Q35_ROWWISE_SOFTMAX=0`
+    // selects the legacy per-column-block kernel as the paired A/B control.
+    static int rowwise = -1;
+    if (rowwise < 0) {
+        const char* flag = getenv("APXINF_Q35_ROWWISE_SOFTMAX");
+        rowwise = (flag != nullptr && flag[0] == '0') ? 0 : 1;
+    }
+    if (rowwise != 0) {
+        if (rows > 2147483647u) return cudaErrorInvalidConfiguration;
+        attention_softmax_bf16_rowwise_kernel<<<rows, BLOCK_SIZE, 0,
+                                               (cudaStream_t)stream>>>(
+            (const __nv_bfloat16*)scores, (__nv_bfloat16*)output,
+            cols, rows, kv_offset, n_heads);
+        return cudaGetLastError();
+    }
     dim3 grid((cols + BLOCK_SIZE - 1) / BLOCK_SIZE, rows, 1);
     dim3 block(BLOCK_SIZE, 1, 1);
     attention_softmax_bf16_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
@@ -534,6 +551,24 @@ extern "C" cudaError_t apxinf_vision_sdpa_bf16(
     dim3 block(32, 1, 1);
     size_t smem = (seq_len + 1) * sizeof(float);
     vision_sdpa_bf16_kernel<<<grid, block, smem, (cudaStream_t)stream>>>(
+        (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v,
+        (__nv_bfloat16*)out, seq_len, n_heads, head_dim, scale);
+    return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_vision_sdpa_bf16_wide(
+    const void* q, const void* k, const void* v, void* out,
+    uint32_t seq_len, uint32_t n_heads, uint32_t head_dim, float scale, void* stream)
+{
+    // Strided per-thread layout: any even head_dim up to 32 * 4 = 128
+    // (Qwen3.5 vision uses 72).
+    if (head_dim == 0 || head_dim % 2 != 0 ||
+        head_dim > 32u * VISION_SDPA_MAX_D_PER_THREAD)
+        return cudaErrorInvalidConfiguration;
+    dim3 grid(seq_len, n_heads, 1);
+    dim3 block(32, 1, 1);
+    size_t smem = (seq_len + 1) * sizeof(float);
+    vision_sdpa_bf16_wide_kernel<<<grid, block, smem, (cudaStream_t)stream>>>(
         (const __nv_bfloat16*)q, (const __nv_bfloat16*)k, (const __nv_bfloat16*)v,
         (__nv_bfloat16*)out, seq_len, n_heads, head_dim, scale);
     return cudaGetLastError();

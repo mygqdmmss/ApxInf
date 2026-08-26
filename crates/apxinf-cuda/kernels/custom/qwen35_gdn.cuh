@@ -21,14 +21,10 @@ __device__ __forceinline__ float qwen35_gdn_softplus(float value) {
   return log1pf(expf(value));
 }
 
-// Transformers' Qwen3.5 path applies l2norm while q/k are still BF16.  Keep
-// both the reciprocal norm and each normalized element at that boundary before
-// converting the vectors to the FP32 recurrent computation.
-__device__ __forceinline__ __nv_bfloat16 qwen35_gdn_bf16_add(
-    __nv_bfloat16 lhs, __nv_bfloat16 rhs) {
-  return __float2bfloat16(__bfloat162float(lhs) + __bfloat162float(rhs));
-}
-
+// Transformers' Qwen3.5 path applies l2norm while q/k are still BF16.  The
+// BF16 square products are accumulated in FP32 by torch.sum, then the reduced
+// norm is rounded back to BF16 before rsqrt and element materialization. Keep
+// that boundary before converting the vectors to the FP32 recurrence.
 __device__ __forceinline__ __nv_bfloat16 qwen35_gdn_bf16_square(
     __nv_bfloat16 value) {
   const float scalar = __bfloat162float(value);
@@ -36,9 +32,11 @@ __device__ __forceinline__ __nv_bfloat16 qwen35_gdn_bf16_square(
 }
 
 __device__ __forceinline__ float qwen35_gdn_bf16_l2_scale(
-    __nv_bfloat16 sum) {
+    float sum) {
+  const __nv_bfloat16 sum_bf16 = __float2bfloat16(sum);
   const __nv_bfloat16 eps_bf16 = __float2bfloat16(1e-6f);
-  const __nv_bfloat16 denominator = qwen35_gdn_bf16_add(sum, eps_bf16);
+  const __nv_bfloat16 denominator = __float2bfloat16(
+      __bfloat162float(sum_bf16) + __bfloat162float(eps_bf16));
   // The pinned pure Transformers implementation applies rsqrt to the BF16
   // reduction for every row. It has no sequence-length-dependent tail path.
   return __bfloat162float(
@@ -146,8 +144,8 @@ __global__ void qwen35_gdn_recurrent_bf16_f32_kernel(
   __shared__ float query_inverse_norm;
   __shared__ float key_inverse_norm;
   if (threadIdx.x == 0) {
-    __nv_bfloat16 query_sum = __float2bfloat16(0.0f);
-    __nv_bfloat16 key_sum = __float2bfloat16(0.0f);
+    float query_sum = 0.0f;
+    float key_sum = 0.0f;
     const int64_t head_base = static_cast<int64_t>(key_head) * key_dim;
     for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
       const __nv_bfloat16 query_bf16 = query[head_base + key_dimension];
@@ -157,10 +155,8 @@ __global__ void qwen35_gdn_recurrent_bf16_f32_kernel(
       if (!isfinite(query_value) || !isfinite(key_value)) {
         atomicOr(error_flags, 1U);
       }
-      query_sum = qwen35_gdn_bf16_add(query_sum,
-                                      qwen35_gdn_bf16_square(query_bf16));
-      key_sum = qwen35_gdn_bf16_add(key_sum,
-                                    qwen35_gdn_bf16_square(key_bf16));
+      query_sum += __bfloat162float(qwen35_gdn_bf16_square(query_bf16));
+      key_sum += __bfloat162float(qwen35_gdn_bf16_square(key_bf16));
     }
     query_inverse_norm = qwen35_gdn_bf16_l2_scale(query_sum);
     key_inverse_norm = qwen35_gdn_bf16_l2_scale(key_sum);
@@ -258,14 +254,17 @@ __global__ void qwen35_gdn_sequence_recurrent_bf16_f32_kernel(
     const __nv_bfloat16* a_log, const __nv_bfloat16* dt_bias,
     __nv_bfloat16* output, uint32_t* error_flags, int rows, int key_heads,
     int value_heads, int key_dim, int value_dim, float* workspace,
-    int64_t workspace_stride) {
+    int64_t workspace_stride, float* qk_scores, float* transition_scores,
+    int chunk_index, int phase) {
   const int head = blockIdx.x;
   if (head >= value_heads) return;
-  // The first version is deliberately correctness-first: one lane performs
-  // the ordered scalar algebra while the block owns a disjoint head/state and
-  // workspace slice. This avoids cross-head synchronization hazards and keeps
-  // all intermediate operations in the same order as the reference.
-  if (threadIdx.x != 0) return;
+  // A block owns one value head, its state slice, and its workspace slice, so
+  // no cross-head synchronization is needed. Inside the block every reduction
+  // that feeds a stored result stays sequential in one lane; only independent
+  // output elements are split across lanes. That keeps this kernel's FP32
+  // accumulation order identical to the single-lane reference ordering.
+  const int lane = threadIdx.x;
+  const int lanes = blockDim.x;
   const int repeat_factor = value_heads / key_heads;
   const int key_head = head / repeat_factor;
   const int64_t state_base = static_cast<int64_t>(head) * key_dim * value_dim;
@@ -277,28 +276,36 @@ __global__ void qwen35_gdn_sequence_recurrent_bf16_f32_kernel(
   float* block_workspace = workspace + static_cast<int64_t>(head) * workspace_stride;
   float* q_norm = block_workspace;
   float* k_norm = q_norm + q_count;
-  float* values = k_norm + q_count;
-  float* beta = values + v_count;
+  float* k_beta = k_norm + q_count;
+  float* decayed_k_beta = k_beta + q_count;
+  float* v_beta = decayed_k_beta + q_count;
+  float* beta = v_beta + v_count;
   float* g_cum = beta + QWEN35_GDN_CHUNK_SIZE;
   float* attn = g_cum + QWEN35_GDN_CHUNK_SIZE;
   float* transformed_values = attn +
       static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * QWEN35_GDN_CHUNK_SIZE;
   float* k_cumdecay = transformed_values + v_count;
   float* v_new = k_cumdecay + q_count;
+  // Operands for the three phase-2/3 products that cuBLAS now performs: the
+  // decayed query rows, the causally masked q/k scores, the state-projected
+  // correction, and the accumulated inter-chunk output.
+  float* q_decay = v_new + v_count;
+  float* masked_qk = q_decay + q_count;
+  float* v_prime = masked_qk +
+      static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * QWEN35_GDN_CHUNK_SIZE;
+  float* attn_inter = v_prime + v_count;
 
-  for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
-    for (int value_dimension = 0; value_dimension < value_dim;
-         ++value_dimension) {
-      const int64_t index = state_base +
-          static_cast<int64_t>(key_dimension) * value_dim + value_dimension;
+  if (phase == 0 && chunk_index == 0) {
+    const int64_t state_elements = static_cast<int64_t>(key_dim) * value_dim;
+    for (int64_t offset = lane; offset < state_elements; offset += lanes) {
+      const int64_t index = state_base + offset;
       const float initial = state_in[index];
       state_out[index] = initial;
       if (!isfinite(initial)) atomicOr(error_flags, 1U);
     }
+    __syncthreads();
   }
 
-  const int chunk_count =
-      (rows + QWEN35_GDN_CHUNK_SIZE - 1) / QWEN35_GDN_CHUNK_SIZE;
   const float query_scale = rsqrtf(static_cast<float>(key_dim));
   const float a_log_value = __bfloat162float(a_log[head]);
   const float dt_bias_value = __bfloat162float(dt_bias[head]);
@@ -307,17 +314,22 @@ __global__ void qwen35_gdn_sequence_recurrent_bf16_f32_kernel(
     atomicOr(error_flags, 1U);
   }
 
-  for (int chunk = 0; chunk < chunk_count; ++chunk) {
+  const int chunk = chunk_index;
+  {
     // Load, normalize, and materialize the BF16 boundary for one chunk.
-    for (int token = 0; token < QWEN35_GDN_CHUNK_SIZE; ++token) {
+    if (phase == 0) {
+    __shared__ float shared_query_inverse_norm[QWEN35_GDN_CHUNK_SIZE];
+    __shared__ float shared_key_inverse_norm[QWEN35_GDN_CHUNK_SIZE];
+    __shared__ float shared_gate[QWEN35_GDN_CHUNK_SIZE];
+    // One lane owns one token so each row's l2 reduction keeps the reference
+    // element order.
+    for (int token = lane; token < QWEN35_GDN_CHUNK_SIZE; token += lanes) {
       const int row = chunk * QWEN35_GDN_CHUNK_SIZE + token;
       const bool valid = row < rows;
       const int64_t q_base = static_cast<int64_t>(row) * query_width +
           static_cast<int64_t>(key_head) * key_dim;
-      const int64_t value_base = static_cast<int64_t>(row) * value_width +
-          static_cast<int64_t>(head) * value_dim;
-      __nv_bfloat16 query_sum = __float2bfloat16(0.0f);
-      __nv_bfloat16 key_sum = __float2bfloat16(0.0f);
+      float query_sum = 0.0f;
+      float key_sum = 0.0f;
       for (int key_dimension = 0; key_dimension < key_dim;
            ++key_dimension) {
         const __nv_bfloat16 query_bf16 = valid
@@ -329,10 +341,8 @@ __global__ void qwen35_gdn_sequence_recurrent_bf16_f32_kernel(
         if (!isfinite(query_value) || !isfinite(key_value)) {
           atomicOr(error_flags, 1U);
         }
-        query_sum = qwen35_gdn_bf16_add(
-            query_sum, qwen35_gdn_bf16_square(query_bf16));
-        key_sum = qwen35_gdn_bf16_add(
-            key_sum, qwen35_gdn_bf16_square(key_bf16));
+        query_sum += __bfloat162float(qwen35_gdn_bf16_square(query_bf16));
+        key_sum += __bfloat162float(qwen35_gdn_bf16_square(key_bf16));
       }
       const float query_inverse_norm =
           qwen35_gdn_bf16_l2_scale(query_sum);
@@ -341,28 +351,8 @@ __global__ void qwen35_gdn_sequence_recurrent_bf16_f32_kernel(
       if (!isfinite(query_inverse_norm) || !isfinite(key_inverse_norm)) {
         atomicOr(error_flags, 2U);
       }
-      for (int key_dimension = 0; key_dimension < key_dim;
-           ++key_dimension) {
-        const __nv_bfloat16 query_bf16 = valid
-            ? query[q_base + key_dimension] : __float2bfloat16(0.0f);
-        const __nv_bfloat16 key_bf16 = valid
-            ? key[q_base + key_dimension] : __float2bfloat16(0.0f);
-        q_norm[static_cast<int64_t>(token) * key_dim + key_dimension] =
-            qwen35_gdn_bf16_l2_value(__bfloat162float(query_bf16),
-                                     query_inverse_norm) * query_scale;
-        k_norm[static_cast<int64_t>(token) * key_dim + key_dimension] =
-            qwen35_gdn_bf16_l2_value(__bfloat162float(key_bf16),
-                                     key_inverse_norm);
-      }
-      for (int value_dimension = 0; value_dimension < value_dim;
-           ++value_dimension) {
-        const __nv_bfloat16 value_bf16 = valid
-            ? value[value_base + value_dimension] : __float2bfloat16(0.0f);
-        const float value_float = __bfloat162float(value_bf16);
-        if (!isfinite(value_float)) atomicOr(error_flags, 1U);
-        values[static_cast<int64_t>(token) * value_dim + value_dimension] =
-            value_float;
-      }
+      shared_query_inverse_norm[token] = query_inverse_norm;
+      shared_key_inverse_norm[token] = key_inverse_norm;
       float g_value = 0.0f;
       float beta_value = 0.0f;
       if (valid) {
@@ -381,139 +371,187 @@ __global__ void qwen35_gdn_sequence_recurrent_bf16_f32_kernel(
         atomicOr(error_flags, 2U);
       }
       beta[token] = beta_value;
-      g_cum[token] = g_value;
-      if (token > 0) g_cum[token] += g_cum[token - 1];
-      if (!isfinite(g_cum[token])) atomicOr(error_flags, 2U);
+      shared_gate[token] = g_value;
+    }
+    __syncthreads();
+    // The cumulative gate is a prefix sum over tokens; keep it in one lane so
+    // the running FP32 total matches the reference addition order.
+    if (lane == 0) {
+      for (int token = 0; token < QWEN35_GDN_CHUNK_SIZE; ++token) {
+        g_cum[token] = shared_gate[token];
+        if (token > 0) g_cum[token] += g_cum[token - 1];
+        if (!isfinite(g_cum[token])) atomicOr(error_flags, 2U);
+      }
+    }
+    const int64_t query_elements =
+        static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * key_dim;
+    for (int64_t index = lane; index < query_elements; index += lanes) {
+      const int token = static_cast<int>(index / key_dim);
+      const int key_dimension = static_cast<int>(index % key_dim);
+      const int row = chunk * QWEN35_GDN_CHUNK_SIZE + token;
+      const bool valid = row < rows;
+      const int64_t q_base = static_cast<int64_t>(row) * query_width +
+          static_cast<int64_t>(key_head) * key_dim;
+      const __nv_bfloat16 query_bf16 = valid
+          ? query[q_base + key_dimension] : __float2bfloat16(0.0f);
+      const __nv_bfloat16 key_bf16 = valid
+          ? key[q_base + key_dimension] : __float2bfloat16(0.0f);
+      const float normalized_key =
+          qwen35_gdn_bf16_l2_value(__bfloat162float(key_bf16),
+                                   shared_key_inverse_norm[token]);
+      q_norm[index] =
+          qwen35_gdn_bf16_l2_value(__bfloat162float(query_bf16),
+                                   shared_query_inverse_norm[token]) *
+          query_scale;
+      k_norm[index] = normalized_key;
+      k_beta[index] = normalized_key * beta[token];
+      if (!isfinite(k_beta[index])) atomicOr(error_flags, 2U);
+    }
+    const int64_t value_elements =
+        static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * value_dim;
+    for (int64_t index = lane; index < value_elements; index += lanes) {
+      const int token = static_cast<int>(index / value_dim);
+      const int value_dimension = static_cast<int>(index % value_dim);
+      const int row = chunk * QWEN35_GDN_CHUNK_SIZE + token;
+      const bool valid = row < rows;
+      const int64_t value_base = static_cast<int64_t>(row) * value_width +
+          static_cast<int64_t>(head) * value_dim;
+      const __nv_bfloat16 value_bf16 = valid
+          ? value[value_base + value_dimension] : __float2bfloat16(0.0f);
+      const float value_float = __bfloat162float(value_bf16);
+      if (!isfinite(value_float)) atomicOr(error_flags, 1U);
+      v_beta[index] = value_float * beta[token];
+      if (!isfinite(v_beta[index])) atomicOr(error_flags, 2U);
+    }
+    return;
     }
 
+    if (phase == 1) {
     // Build the strictly-lower chunk transition and solve its triangular
     // inverse row by row, exactly as the reference implementation does.
-    for (int i = 0; i < QWEN35_GDN_CHUNK_SIZE; ++i) {
-      for (int j = 0; j < QWEN35_GDN_CHUNK_SIZE; ++j) {
-        float entry = 0.0f;
-        if (j < i) {
-          float dot = 0.0f;
-          for (int key_dimension = 0; key_dimension < key_dim;
-               ++key_dimension) {
-            const float kb = k_norm[static_cast<int64_t>(i) * key_dim +
-                                    key_dimension] * beta[i];
-            const float kj = k_norm[static_cast<int64_t>(j) * key_dim +
-                                    key_dimension];
-            dot += kb * kj;
-          }
-          entry = -dot * expf(g_cum[i] - g_cum[j]);
-        }
-        attn[static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + j] = entry;
+    __shared__ float shared_row[QWEN35_GDN_CHUNK_SIZE];
+    const int64_t matrix_elements =
+        static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * QWEN35_GDN_CHUNK_SIZE;
+    for (int64_t index = lane; index < matrix_elements; index += lanes) {
+      const int i = static_cast<int>(index / QWEN35_GDN_CHUNK_SIZE);
+      const int j = static_cast<int>(index % QWEN35_GDN_CHUNK_SIZE);
+      float entry = 0.0f;
+      if (j < i) {
+        const float dot = transition_scores[
+            static_cast<int64_t>(head) * QWEN35_GDN_CHUNK_SIZE *
+                QWEN35_GDN_CHUNK_SIZE +
+            index];
+        entry = -dot * expf(g_cum[i] - g_cum[j]);
       }
+      attn[index] = entry;
     }
+    __syncthreads();
+    // Row i of the inverse depends on rows below it, so the row loop stays
+    // sequential. Each lane owns whole columns of row i, and the column's
+    // four-way partial split preserves the reference accumulation order.
     for (int i = 1; i < QWEN35_GDN_CHUNK_SIZE; ++i) {
-      float row_values[QWEN35_GDN_CHUNK_SIZE];
-      for (int j = 0; j < i; ++j) {
-        row_values[j] = attn[static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + j];
+      for (int j = lane; j < i; j += lanes) {
+        shared_row[j] = attn[static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + j];
       }
-      for (int column = 0; column < i; ++column) {
-        float correction = 0.0f;
+      __syncthreads();
+      for (int column = lane; column < i; column += lanes) {
+        float correction_parts[4] = {0.0f, 0.0f, 0.0f, 0.0f};
         for (int j = 0; j < i; ++j) {
-          correction += row_values[j] *
+          correction_parts[j & 3] += shared_row[j] *
               attn[static_cast<int64_t>(j) * QWEN35_GDN_CHUNK_SIZE + column];
         }
+        float correction = correction_parts[0];
+        correction += correction_parts[1];
+        correction += correction_parts[2];
+        correction += correction_parts[3];
         attn[static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + column] =
-            row_values[column] + correction;
+            shared_row[column] + correction;
       }
+      __syncthreads();
     }
-    for (int i = 0; i < QWEN35_GDN_CHUNK_SIZE; ++i) {
+    for (int i = lane; i < QWEN35_GDN_CHUNK_SIZE; i += lanes) {
       attn[static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + i] = 1.0f;
     }
-
-    for (int i = 0; i < QWEN35_GDN_CHUNK_SIZE; ++i) {
-      for (int value_dimension = 0; value_dimension < value_dim;
-           ++value_dimension) {
-        float transformed = 0.0f;
-        for (int j = 0; j < QWEN35_GDN_CHUNK_SIZE; ++j) {
-          transformed += attn[static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + j] *
-              values[static_cast<int64_t>(j) * value_dim + value_dimension] * beta[j];
-        }
-        transformed_values[static_cast<int64_t>(i) * value_dim + value_dimension] =
-            transformed;
-      }
-      for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
-        float cumulative = 0.0f;
-        for (int j = 0; j < QWEN35_GDN_CHUNK_SIZE; ++j) {
-          cumulative += attn[static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + j] *
-              k_norm[static_cast<int64_t>(j) * key_dim + key_dimension] * beta[j] *
-              expf(g_cum[j]);
-        }
-        k_cumdecay[static_cast<int64_t>(i) * key_dim + key_dimension] = cumulative;
-      }
+    const int64_t query_elements =
+        static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * key_dim;
+    for (int64_t index = lane; index < query_elements; index += lanes) {
+      const int token = static_cast<int>(index / key_dim);
+      decayed_k_beta[index] = k_beta[index] * expf(g_cum[token]);
+      if (!isfinite(decayed_k_beta[index])) atomicOr(error_flags, 2U);
+    }
+    return;
     }
 
     // Compute all per-token corrections from the state entering this chunk;
     // only after those outputs are available is the state transitioned once.
-    for (int i = 0; i < QWEN35_GDN_CHUNK_SIZE; ++i) {
-      const int row = chunk * QWEN35_GDN_CHUNK_SIZE + i;
-      for (int value_dimension = 0; value_dimension < value_dim;
-           ++value_dimension) {
-        float v_prime = 0.0f;
-        for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
-          const int64_t state_index = state_base +
-              static_cast<int64_t>(key_dimension) * value_dim + value_dimension;
-          v_prime += k_cumdecay[static_cast<int64_t>(i) * key_dim + key_dimension] *
-              state_out[state_index];
-        }
-        const float corrected = transformed_values[
-            static_cast<int64_t>(i) * value_dim + value_dimension] - v_prime;
-        v_new[static_cast<int64_t>(i) * value_dim + value_dimension] = corrected;
-        if (!isfinite(corrected)) atomicOr(error_flags, 2U);
-      }
-      if (row < rows) {
-        const int64_t output_base = static_cast<int64_t>(row) * value_width +
-            static_cast<int64_t>(head) * value_dim;
-        const float row_decay = expf(g_cum[i]);
-        for (int value_dimension = 0; value_dimension < value_dim;
-             ++value_dimension) {
-          float interaction = 0.0f;
-          float causal = 0.0f;
-          for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
-            const int64_t state_index = state_base +
-                static_cast<int64_t>(key_dimension) * value_dim + value_dimension;
-            interaction += q_norm[static_cast<int64_t>(i) * key_dim + key_dimension] *
-                row_decay * state_out[state_index];
-          }
-          for (int j = 0; j <= i; ++j) {
-            float score = 0.0f;
-            for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
-              score += q_norm[static_cast<int64_t>(i) * key_dim + key_dimension] *
-                  k_norm[static_cast<int64_t>(j) * key_dim + key_dimension];
-            }
-            score *= expf(g_cum[i] - g_cum[j]);
-            causal += score * v_new[static_cast<int64_t>(j) * value_dim + value_dimension];
-          }
-          const float result = interaction + causal;
-          if (!isfinite(result)) atomicOr(error_flags, 2U);
-          output[output_base + value_dimension] = __float2bfloat16(result);
-          if (!isfinite(__bfloat162float(output[output_base + value_dimension]))) {
-            atomicOr(error_flags, 2U);
-          }
-        }
-      }
-    }
-
-    const float final_decay = expf(g_cum[QWEN35_GDN_CHUNK_SIZE - 1]);
-    if (!isfinite(final_decay)) atomicOr(error_flags, 2U);
-    for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
-      for (int value_dimension = 0; value_dimension < value_dim;
-           ++value_dimension) {
+    // `v_new` for row j never depends on any output row, so materializing the
+    // whole chunk before the output pass keeps the reference values while
+    // letting lanes own independent (row, value dimension) pairs.
+    const int64_t value_elements =
+        static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * value_dim;
+    for (int64_t index = lane; index < value_elements; index += lanes) {
+      const int i = static_cast<int>(index / value_dim);
+      const int value_dimension = static_cast<int>(index % value_dim);
+      float v_prime = 0.0f;
+      for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
         const int64_t state_index = state_base +
             static_cast<int64_t>(key_dimension) * value_dim + value_dimension;
-        float updated = state_out[state_index] * final_decay;
-        for (int i = 0; i < QWEN35_GDN_CHUNK_SIZE; ++i) {
-          updated += k_norm[static_cast<int64_t>(i) * key_dim + key_dimension] *
-              expf(g_cum[QWEN35_GDN_CHUNK_SIZE - 1] - g_cum[i]) *
-              v_new[static_cast<int64_t>(i) * value_dim + value_dimension];
-        }
-        state_out[state_index] = updated;
-        if (!isfinite(updated)) atomicOr(error_flags, 2U);
+        v_prime += k_cumdecay[static_cast<int64_t>(i) * key_dim + key_dimension] *
+            state_out[state_index];
       }
+      const float corrected = transformed_values[index] - v_prime;
+      v_new[index] = corrected;
+      if (!isfinite(corrected)) atomicOr(error_flags, 2U);
+    }
+    __syncthreads();
+    for (int64_t index = lane; index < value_elements; index += lanes) {
+      const int i = static_cast<int>(index / value_dim);
+      const int row = chunk * QWEN35_GDN_CHUNK_SIZE + i;
+      if (row >= rows) continue;
+      const int value_dimension = static_cast<int>(index % value_dim);
+      const int64_t output_base = static_cast<int64_t>(row) * value_width +
+          static_cast<int64_t>(head) * value_dim;
+      const float row_decay = expf(g_cum[i]);
+      float interaction = 0.0f;
+      float causal = 0.0f;
+      for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
+        const int64_t state_index = state_base +
+            static_cast<int64_t>(key_dimension) * value_dim + value_dimension;
+        interaction += q_norm[static_cast<int64_t>(i) * key_dim + key_dimension] *
+            row_decay * state_out[state_index];
+      }
+      for (int j = 0; j <= i; ++j) {
+        float score = qk_scores[
+            static_cast<int64_t>(head) * QWEN35_GDN_CHUNK_SIZE *
+                QWEN35_GDN_CHUNK_SIZE +
+            static_cast<int64_t>(i) * QWEN35_GDN_CHUNK_SIZE + j];
+        score *= expf(g_cum[i] - g_cum[j]);
+        causal += score * v_new[static_cast<int64_t>(j) * value_dim + value_dimension];
+      }
+      const float result = interaction + causal;
+      if (!isfinite(result)) atomicOr(error_flags, 2U);
+      output[output_base + value_dimension] = __float2bfloat16(result);
+      if (!isfinite(__bfloat162float(output[output_base + value_dimension]))) {
+        atomicOr(error_flags, 2U);
+      }
+    }
+    __syncthreads();
+
+    const float final_decay = expf(g_cum[QWEN35_GDN_CHUNK_SIZE - 1]);
+    if (lane == 0 && !isfinite(final_decay)) atomicOr(error_flags, 2U);
+    const int64_t query_elements =
+        static_cast<int64_t>(QWEN35_GDN_CHUNK_SIZE) * key_dim;
+    for (int64_t index = lane; index < query_elements; index += lanes) {
+      const int i = static_cast<int>(index / key_dim);
+      k_cumdecay[index] = k_norm[index] *
+          expf(g_cum[QWEN35_GDN_CHUNK_SIZE - 1] - g_cum[i]);
+      if (!isfinite(k_cumdecay[index])) atomicOr(error_flags, 2U);
+    }
+    const int64_t state_elements = static_cast<int64_t>(key_dim) * value_dim;
+    for (int64_t offset = lane; offset < state_elements; offset += lanes) {
+      const int64_t state_index = state_base + offset;
+      state_out[state_index] *= final_decay;
+      if (!isfinite(state_out[state_index])) atomicOr(error_flags, 2U);
     }
   }
 }

@@ -270,6 +270,17 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
     }
 
     pub fn handle_non_stream(&self, raw: &[u8]) -> HttpResponse {
+        self.handle_non_stream_with_cancel(raw, CancellationToken::new())
+    }
+
+    /// Non-streaming request path with an externally owned cancellation
+    /// token, so the HTTP layer can abort the generation when the client
+    /// disconnects before the result is written.
+    pub fn handle_non_stream_with_cancel(
+        &self,
+        raw: &[u8],
+        cancel: CancellationToken,
+    ) -> HttpResponse {
         let request = match parse_generate_request(raw, self.capabilities.max_model_len) {
             Ok(request) => request,
             Err(error) => return invalid_response(error),
@@ -279,7 +290,7 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
                 "stream=true requires the streaming response path",
             ));
         }
-        let mut generation = match self.start(request) {
+        let mut generation = match self.start(request, cancel) {
             Ok(generation) => generation,
             Err(error) => {
                 self.note_runtime_error(&error);
@@ -308,6 +319,17 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
     }
 
     pub fn start_stream(&self, raw: &[u8]) -> Result<SseGeneration, HttpResponse> {
+        self.start_stream_with_cancel(raw, CancellationToken::new())
+    }
+
+    /// Streaming request path with an externally owned cancellation token,
+    /// so the HTTP layer can abort the generation while it is still inside
+    /// prefill and no frame has been produced yet.
+    pub fn start_stream_with_cancel(
+        &self,
+        raw: &[u8],
+        cancel: CancellationToken,
+    ) -> Result<SseGeneration, HttpResponse> {
         let request = parse_generate_request(raw, self.capabilities.max_model_len)
             .map_err(invalid_response)?;
         if !request.stream {
@@ -315,7 +337,7 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
                 "stream=false requires the non-streaming response path",
             )));
         }
-        let generation = self.start(request).map_err(|error| {
+        let generation = self.start(request, cancel).map_err(|error| {
             self.note_runtime_error(&error);
             runtime_response(error)
         })?;
@@ -326,12 +348,17 @@ impl<R: ProtocolRuntime> ProtocolService<R> {
         })
     }
 
-    fn start(&self, request: GenerateRequest) -> Result<ActiveGeneration, RuntimeError> {
+    fn start(
+        &self,
+        request: GenerateRequest,
+        cancel: CancellationToken,
+    ) -> Result<ActiveGeneration, RuntimeError> {
         if !self.ready.load(Ordering::Acquire) {
             return Err(RuntimeError::Unhealthy);
         }
-        let runtime_request =
+        let mut runtime_request =
             RuntimeRequest::new(request.input_ids.clone(), request.max_new_tokens);
+        runtime_request.cancel = cancel;
         let request_cancel = runtime_request.cancel.clone();
         let stream = self.runtime.start(runtime_request)?;
         Ok(ActiveGeneration {

@@ -54,11 +54,20 @@ impl Qwen35StepSession for Qwen35CudaStepSession {
 impl Qwen35StepExecutor for Qwen35CudaStepExecutor {
     fn open(&self, request: RuntimeRequest) -> Result<Box<dyn Qwen35StepSession>, RuntimeError> {
         self.model
-            .open(&request.input_ids, request.max_new_tokens)
+            .open_with_cancel(&request.input_ids, request.max_new_tokens, &request.cancel)
             .map(|session| {
                 Box::new(Qwen35CudaStepSession { session }) as Box<dyn Qwen35StepSession>
             })
-            .map_err(RuntimeError::Execution)
+            .map_err(|error| {
+                // A client disconnect aborts prefill mid-open; that is a
+                // request-level cancellation, not a fatal executor failure,
+                // so it must not poison service readiness.
+                if request.cancel.is_cancelled() {
+                    RuntimeError::Cancelled
+                } else {
+                    RuntimeError::Execution(error)
+                }
+            })
     }
 }
 
@@ -266,11 +275,24 @@ impl TokenStream for Qwen35ProtocolTokenStream {
             self.cancel_worker();
             return Err(RuntimeError::Cancelled);
         }
+        // The session worker exits as soon as it observes cancellation, which
+        // can race with a `Next` command already in flight; a disconnected
+        // channel on a cancelled request is a cancellation, not a stopped
+        // worker, and must not be reported as a fatal error.
+        let disconnected = |cancelled: bool| {
+            if cancelled {
+                RuntimeError::Cancelled
+            } else {
+                RuntimeError::WorkerStopped
+            }
+        };
         let (response, result) = mpsc::channel();
         self.commands
             .send(SessionCommand::Next(response))
-            .map_err(|_| RuntimeError::WorkerStopped)?;
-        let result = result.recv().unwrap_or(Err(RuntimeError::WorkerStopped));
+            .map_err(|_| disconnected(self.request_cancel.is_cancelled()))?;
+        let result = result
+            .recv()
+            .unwrap_or_else(|_| Err(disconnected(self.request_cancel.is_cancelled())));
         if matches!(result, Ok(None) | Err(_)) {
             self.finished.store(true, Ordering::Release);
         }
@@ -404,6 +426,69 @@ mod tests {
             runtime.start(RuntimeRequest::new(vec![1], 1)),
             Err(RuntimeError::Capacity)
         ));
+    }
+
+    #[test]
+    fn cancelling_during_open_releases_capacity_and_maps_to_cancelled() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// First open mimics the production executor's cancellable prefill:
+        /// it blocks until the request token is cancelled, then reports the
+        /// abort. Subsequent opens return a working one-token session.
+        struct SlowThenReadyExecutor {
+            opens: AtomicUsize,
+        }
+
+        impl Qwen35StepExecutor for SlowThenReadyExecutor {
+            fn open(
+                &self,
+                request: RuntimeRequest,
+            ) -> Result<Box<dyn Qwen35StepSession>, RuntimeError> {
+                if self.opens.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                    while std::time::Instant::now() < deadline {
+                        if request.cancel.is_cancelled() {
+                            return Err(RuntimeError::Cancelled);
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    return Err(RuntimeError::Execution("open was never cancelled".into()));
+                }
+                Ok(Box::new(FakeSession {
+                    steps: vec![Ok(9)].into(),
+                }))
+            }
+        }
+
+        let runtime = Arc::new(
+            Qwen35ProtocolRuntime::new(
+                RuntimeCapabilities::frozen_qwen35(32, 0),
+                1,
+                Arc::new(SlowThenReadyExecutor {
+                    opens: AtomicUsize::new(0),
+                }),
+            )
+            .unwrap(),
+        );
+        let request = RuntimeRequest::new(vec![1], 2);
+        let cancel = request.cancel.clone();
+        let starter = {
+            let runtime = Arc::clone(&runtime);
+            std::thread::spawn(move || runtime.start(request).map(|_| ()))
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(runtime.active_requests(), 1);
+        cancel.cancel();
+        assert_eq!(starter.join().unwrap(), Err(RuntimeError::Cancelled));
+        for _ in 0..500 {
+            if runtime.active_requests() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(runtime.active_requests(), 0);
+        let mut recovered = runtime.start(RuntimeRequest::new(vec![1], 1)).unwrap();
+        assert_eq!(recovered.next_token().unwrap(), Some(9));
     }
 
     #[test]

@@ -77,6 +77,10 @@ extern "C" {
         value_dim: i32,
         workspace: *mut c_void,
         workspace_stride: i64,
+        qk_scores: *mut c_void,
+        transition_scores: *mut c_void,
+        chunk_index: i32,
+        phase: i32,
         stream: cudaStream_t,
     ) -> cudaError_t;
 
@@ -101,6 +105,75 @@ extern "C" {
         output: *mut c_void,
         error_flags: *mut c_void,
         rows: i32,
+        out_features: i32,
+        in_features: i32,
+        group_size: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_static_qwen35_w4_project_bf16_packed(
+        activation: *const c_void,
+        weight_packed: *const c_void,
+        scales: *const c_void,
+        zero_points: *const c_void,
+        output: *mut c_void,
+        error_flags: *mut c_void,
+        rows: i32,
+        out_features: i32,
+        in_features: i32,
+        group_size: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_static_qwen35_w4_project_bf16_diag(
+        activation: *const c_void,
+        weight_packed: *const c_void,
+        scales: *const c_void,
+        zero_points: *const c_void,
+        output: *mut c_void,
+        error_flags: *mut c_void,
+        rows: i32,
+        out_features: i32,
+        in_features: i32,
+        group_size: i32,
+        variant: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_static_qwen35_w4_project_bf16_marlin(
+        activation: *const c_void,
+        weight_packed: *const c_void,
+        scales: *const c_void,
+        zero_points: *const c_void,
+        output: *mut c_void,
+        error_flags: *mut c_void,
+        rows: i32,
+        out_features: i32,
+        in_features: i32,
+        group_size: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_static_qwen35_w4_project_bf16_warp(
+        activation: *const c_void,
+        weight_packed: *const c_void,
+        scales: *const c_void,
+        zero_points: *const c_void,
+        output: *mut c_void,
+        error_flags: *mut c_void,
+        rows: i32,
+        out_features: i32,
+        in_features: i32,
+        group_size: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_static_qwen35_w4_dequantize_bf16(
+        weight_packed: *const c_void,
+        scales: *const c_void,
+        zero_points: *const c_void,
+        dequantized: *mut c_void,
+        error_flags: *mut c_void,
         out_features: i32,
         in_features: i32,
         group_size: i32,
@@ -992,6 +1065,18 @@ extern "C" {
     ) -> cudaError_t;
 
     pub fn apxinf_vision_sdpa_bf16(
+        q: *const c_void,
+        k: *const c_void,
+        v: *const c_void,
+        out: *mut c_void,
+        seq_len: u32,
+        n_heads: u32,
+        head_dim: u32,
+        scale: f32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_vision_sdpa_bf16_wide(
         q: *const c_void,
         k: *const c_void,
         v: *const c_void,

@@ -6,10 +6,102 @@ use apxinf_core::{DType, Device, Error, Result, Shape, Tensor};
 
 use crate::buffer::CudaBuffer;
 use crate::context::CudaContext;
+use crate::cublas::CublasTranspose;
 use crate::ffi;
 
 const FLAG_NON_FINITE_INPUT: u32 = 1;
 const FLAG_NON_FINITE_OUTPUT: u32 = 2;
+
+/// Deferred-status mode: instead of allocating a fresh flags buffer and doing
+/// a full stream synchronize + device-to-host read after every GDN op (about
+/// four synchronizations per GDN layer per token), ops latch their non-finite
+/// flags into one resident per-device buffer via `atomicOr` and the caller
+/// drains it once per decoded token / prefill block with
+/// [`drain_deferred_status`]. Numerics are unchanged (same kernels, same
+/// order); only the point at which a non-finite value aborts the request
+/// moves from per-op to per-token/per-block granularity, after which the
+/// failed session is dropped as before. Read from the environment on every
+/// call (matching the debug-capture hooks) so tests can flip modes; default
+/// off, i.e. the eager per-op behaviour is preserved bit-for-bit.
+fn deferred_status_enabled() -> bool {
+    std::env::var("APXINF_Q35_DEFERRED_STATUS").is_ok_and(|value| value == "1")
+}
+
+fn shared_status_flags(device: usize) -> Result<&'static CudaBuffer> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static FLAGS: OnceLock<Mutex<HashMap<usize, &'static CudaBuffer>>> = OnceLock::new();
+    let registry = FLAGS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = registry
+        .lock()
+        .map_err(|_| Error::Other("deferred status registry poisoned".into()))?;
+    if let Some(buffer) = guard.get(&device) {
+        return Ok(buffer);
+    }
+    let buffer: &'static CudaBuffer = Box::leak(Box::new(alloc_zeroed(size_of::<u32>(), device)?));
+    guard.insert(device, buffer);
+    Ok(buffer)
+}
+
+/// Per-op status flag handle. Eager mode owns a freshly zeroed buffer and
+/// checks it synchronously; deferred mode shares the resident latch buffer
+/// and defers the check to [`drain_deferred_status`].
+enum StatusFlags {
+    Eager(CudaBuffer),
+    Deferred(&'static CudaBuffer),
+}
+
+impl StatusFlags {
+    fn acquire(ctx: &CudaContext) -> Result<Self> {
+        if deferred_status_enabled() {
+            Ok(Self::Deferred(shared_status_flags(ctx.device_id())?))
+        } else {
+            Ok(Self::Eager(alloc_zeroed(
+                size_of::<u32>(),
+                ctx.device_id(),
+            )?))
+        }
+    }
+
+    fn ptr(&self) -> *mut std::ffi::c_void {
+        match self {
+            Self::Eager(buffer) => buffer.ptr(),
+            Self::Deferred(buffer) => buffer.ptr(),
+        }
+    }
+
+    fn finish(self, ctx: &CudaContext, operation: &str) -> Result<()> {
+        match self {
+            Self::Eager(buffer) => {
+                let flag = read_status(ctx, &buffer)?;
+                if flag != 0 {
+                    return Err(status_error(operation, flag));
+                }
+                Ok(())
+            }
+            Self::Deferred(_) => Ok(()),
+        }
+    }
+}
+
+/// Synchronize once, surface any latched deferred non-finite status, and
+/// clear the latch so the next request starts clean. No-op unless
+/// `APXINF_Q35_DEFERRED_STATUS=1`.
+pub fn drain_deferred_status(ctx: &CudaContext, operation: &str) -> Result<()> {
+    if !deferred_status_enabled() {
+        return Ok(());
+    }
+    let flags = shared_status_flags(ctx.device_id())?;
+    let flag = read_status(ctx, flags)?;
+    if flag != 0 {
+        unsafe {
+            ffi::check_cuda(ffi::cudaMemset(flags.ptr(), 0, size_of::<u32>()))
+                .map_err(Error::Cuda)?;
+        }
+        return Err(status_error(operation, flag));
+    }
+    Ok(())
+}
 
 /// Check a BF16 tensor for NaN/Inf values on the selected CUDA device.
 pub fn require_finite_bf16(ctx: &CudaContext, tensor: &Tensor, operation: &str) -> Result<()> {
@@ -27,7 +119,7 @@ pub fn require_finite_bf16(ctx: &CudaContext, tensor: &Tensor, operation: &str) 
         )));
     }
     let input = CudaBuffer::from_tensor(tensor).map_err(Error::Cuda)?;
-    let flags = alloc_zeroed(size_of::<u32>(), ctx.device_id())?;
+    let flags = StatusFlags::acquire(ctx)?;
     let elements = dims.iter().try_fold(1usize, |total, dimension| {
         total
             .checked_mul(*dimension)
@@ -42,11 +134,13 @@ pub fn require_finite_bf16(ctx: &CudaContext, tensor: &Tensor, operation: &str) 
         ))
         .map_err(Error::Cuda)?;
     }
-    let flag = read_status(ctx, &flags)?;
-    if flag != 0 {
-        return Err(Error::Other(format!(
-            "{operation} contains a non-finite value"
-        )));
+    if let StatusFlags::Eager(buffer) = flags {
+        let flag = read_status(ctx, &buffer)?;
+        if flag != 0 {
+            return Err(Error::Other(format!(
+                "{operation} contains a non-finite value"
+            )));
+        }
     }
     Ok(())
 }
@@ -243,7 +337,7 @@ impl Qwen35GdnState {
         let weight_buffer = CudaBuffer::from_tensor(weights).map_err(Error::Cuda)?;
         let output_bytes = checked_bytes(self.layout.conv_channels(), DType::BF16)?;
         let output = alloc_zeroed(output_bytes, ctx.device_id())?;
-        let flags = alloc_zeroed(size_of::<u32>(), ctx.device_id())?;
+        let flags = StatusFlags::acquire(ctx)?;
         unsafe {
             ffi::check_cuda(ffi::apxinf_qwen35_gdn_conv_bf16(
                 self.conv_current.ptr(),
@@ -259,10 +353,7 @@ impl Qwen35GdnState {
             ))
             .map_err(Error::Cuda)?;
         }
-        let flag = read_status(ctx, &flags)?;
-        if flag != 0 {
-            return Err(status_error("GDN convolution", flag));
-        }
+        flags.finish(ctx, "GDN convolution")?;
         std::mem::swap(&mut self.conv_current, &mut self.conv_scratch);
         copy_device_buffer(&self.conv_scratch, &self.conv_backup)?;
         self.conv_cursor = (self.conv_cursor + 1) % self.layout.conv_kernel;
@@ -325,7 +416,7 @@ impl Qwen35GdnState {
             DType::BF16,
         )?;
         let output = alloc_zeroed(output_bytes, ctx.device_id())?;
-        let flags = alloc_zeroed(size_of::<u32>(), ctx.device_id())?;
+        let flags = StatusFlags::acquire(ctx)?;
         unsafe {
             ffi::check_cuda(ffi::apxinf_qwen35_gdn_conv_prefill_bf16(
                 self.conv_current.ptr(),
@@ -342,10 +433,7 @@ impl Qwen35GdnState {
             ))
             .map_err(Error::Cuda)?;
         }
-        let flag = read_status(ctx, &flags)?;
-        if flag != 0 {
-            return Err(status_error("GDN convolution prefill", flag));
-        }
+        flags.finish(ctx, "GDN convolution prefill")?;
         std::mem::swap(&mut self.conv_current, &mut self.conv_scratch);
         copy_device_buffer(&self.conv_scratch, &self.conv_backup)?;
         self.conv_cursor = (self.conv_cursor + rows) % self.layout.conv_kernel;
@@ -392,7 +480,7 @@ impl Qwen35GdnState {
             checked_bytes(self.layout.value_width(), DType::BF16)?,
             ctx.device_id(),
         )?;
-        let flags = alloc_zeroed(size_of::<u32>(), ctx.device_id())?;
+        let flags = StatusFlags::acquire(ctx)?;
         unsafe {
             ffi::check_cuda(ffi::apxinf_qwen35_gdn_recurrent_bf16_f32(
                 self.recurrent_current.ptr(),
@@ -414,10 +502,7 @@ impl Qwen35GdnState {
             ))
             .map_err(Error::Cuda)?;
         }
-        let flag = read_status(ctx, &flags)?;
-        if flag != 0 {
-            return Err(status_error("GDN recurrent update", flag));
-        }
+        flags.finish(ctx, "GDN recurrent update")?;
         std::mem::swap(&mut self.recurrent_current, &mut self.recurrent_scratch);
         copy_device_buffer(&self.recurrent_scratch, &self.recurrent_backup)?;
         self.recurrent_commit_pending_rollback = true;
@@ -490,35 +575,317 @@ impl Qwen35GdnState {
             )?,
             ctx.device_id(),
         )?;
-        let flags = alloc_zeroed(size_of::<u32>(), ctx.device_id())?;
-        unsafe {
-            ffi::check_cuda(ffi::apxinf_qwen35_gdn_sequence_recurrent_bf16_f32(
-                self.recurrent_current.ptr(),
-                self.recurrent_scratch.ptr(),
-                query.ptr(),
-                key.ptr(),
-                value.ptr(),
-                a.ptr(),
-                b.ptr(),
-                a_log.ptr(),
-                dt_bias.ptr(),
-                output.ptr(),
-                flags.ptr(),
-                checked_i32(rows, "GDN recurrent prefill rows")?,
-                checked_i32(self.layout.key_heads, "GDN key heads")?,
-                checked_i32(self.layout.value_heads, "GDN value heads")?,
-                checked_i32(self.layout.key_dim, "GDN key dimension")?,
-                checked_i32(self.layout.value_dim, "GDN value dimension")?,
-                workspace.ptr(),
-                workspace_stride,
-                ctx.stream().handle(),
-            ))
+        let flags = StatusFlags::acquire(ctx)?;
+        let chunk_count = rows
+            .checked_add(63)
+            .and_then(|value| value.checked_div(64))
+            .ok_or_else(|| Error::Other("GDN chunk count overflow".into()))?;
+        let qk_elements = self
+            .layout
+            .value_heads
+            .checked_mul(64)
+            .and_then(|value| value.checked_mul(64))
+            .ok_or_else(|| Error::Other("GDN qk workspace size overflow".into()))?;
+        let qk_scores = alloc_zeroed(checked_bytes(qk_elements, DType::F32)?, ctx.device_id())?;
+        let transition_scores =
+            alloc_zeroed(checked_bytes(qk_elements, DType::F32)?, ctx.device_id())?;
+        let workspace_bytes = workspace.len();
+        let q_norm = workspace.view(0, workspace_bytes).map_err(Error::Cuda)?;
+        let k_norm = workspace
+            .view(
+                checked_bytes(
+                    64usize
+                        .checked_mul(self.layout.key_dim)
+                        .ok_or_else(|| Error::Other("GDN qk offset overflow".into()))?,
+                    DType::F32,
+                )?,
+                workspace_bytes
+                    .checked_sub(checked_bytes(64 * self.layout.key_dim, DType::F32)?)
+                    .ok_or_else(|| Error::Other("GDN qk view underflow".into()))?,
+            )
             .map_err(Error::Cuda)?;
+        let qk_bytes = checked_bytes(
+            64usize
+                .checked_mul(self.layout.key_dim)
+                .ok_or_else(|| Error::Other("GDN k_beta offset overflow".into()))?,
+            DType::F32,
+        )?;
+        let k_beta_offset = qk_bytes
+            .checked_mul(2)
+            .ok_or_else(|| Error::Other("GDN k_beta offset overflow".into()))?;
+        let k_beta = workspace
+            .view(
+                k_beta_offset,
+                workspace_bytes
+                    .checked_sub(k_beta_offset)
+                    .ok_or_else(|| Error::Other("GDN k_beta view underflow".into()))?,
+            )
+            .map_err(Error::Cuda)?;
+        let decayed_k_beta = workspace
+            .view(
+                qk_bytes
+                    .checked_mul(3)
+                    .ok_or_else(|| Error::Other("GDN decayed-k offset overflow".into()))?,
+                workspace_bytes
+                    .checked_sub(
+                        qk_bytes
+                            .checked_mul(3)
+                            .ok_or_else(|| Error::Other("GDN decayed-k offset overflow".into()))?,
+                    )
+                    .ok_or_else(|| Error::Other("GDN decayed-k view underflow".into()))?,
+            )
+            .map_err(Error::Cuda)?;
+        let v_beta_offset = qk_bytes
+            .checked_mul(4)
+            .ok_or_else(|| Error::Other("GDN v_beta offset overflow".into()))?;
+        let v_beta_bytes = checked_bytes(
+            64usize
+                .checked_mul(self.layout.value_dim)
+                .ok_or_else(|| Error::Other("GDN v_beta size overflow".into()))?,
+            DType::F32,
+        )?;
+        let v_beta = workspace
+            .view(
+                v_beta_offset,
+                workspace_bytes
+                    .checked_sub(v_beta_offset)
+                    .ok_or_else(|| Error::Other("GDN v_beta view underflow".into()))?,
+            )
+            .map_err(Error::Cuda)?;
+        let attn_offset = v_beta_offset
+            .checked_add(v_beta_bytes)
+            .and_then(|value| value.checked_add(128 * std::mem::size_of::<f32>()))
+            .ok_or_else(|| Error::Other("GDN attn offset overflow".into()))?;
+        let attn = workspace
+            .view(
+                attn_offset,
+                64usize
+                    .checked_mul(64)
+                    .and_then(|value| value.checked_mul(std::mem::size_of::<f32>()))
+                    .ok_or_else(|| Error::Other("GDN attn size overflow".into()))?,
+            )
+            .map_err(Error::Cuda)?;
+        let transformed = workspace
+            .view(
+                attn_offset + 64 * 64 * std::mem::size_of::<f32>(),
+                v_beta_bytes,
+            )
+            .map_err(Error::Cuda)?;
+        let k_cumdecay = workspace
+            .view(
+                attn_offset + 64 * 64 * std::mem::size_of::<f32>() + v_beta_bytes,
+                qk_bytes,
+            )
+            .map_err(Error::Cuda)?;
+        let v_new = workspace
+            .view(
+                attn_offset + 64 * 64 * std::mem::size_of::<f32>() + v_beta_bytes + qk_bytes,
+                v_beta_bytes,
+            )
+            .map_err(Error::Cuda)?;
+        let qk_stride = checked_i64(64usize * 64, "GDN qk stride")?;
+        let state_stride = checked_i64(
+            self.layout
+                .key_dim
+                .checked_mul(self.layout.value_dim)
+                .ok_or_else(|| Error::Other("GDN recurrent state stride overflow".into()))?,
+            "GDN recurrent state stride",
+        )?;
+        for chunk in 0..chunk_count {
+            unsafe {
+                ffi::check_cuda(ffi::apxinf_qwen35_gdn_sequence_recurrent_bf16_f32(
+                    self.recurrent_current.ptr(),
+                    self.recurrent_scratch.ptr(),
+                    query.ptr(),
+                    key.ptr(),
+                    value.ptr(),
+                    a.ptr(),
+                    b.ptr(),
+                    a_log.ptr(),
+                    dt_bias.ptr(),
+                    output.ptr(),
+                    flags.ptr(),
+                    checked_i32(rows, "GDN recurrent prefill rows")?,
+                    checked_i32(self.layout.key_heads, "GDN key heads")?,
+                    checked_i32(self.layout.value_heads, "GDN value heads")?,
+                    checked_i32(self.layout.key_dim, "GDN key dimension")?,
+                    checked_i32(self.layout.value_dim, "GDN value dimension")?,
+                    workspace.ptr(),
+                    workspace_stride,
+                    qk_scores.ptr(),
+                    transition_scores.ptr(),
+                    checked_i32(chunk, "GDN chunk index")?,
+                    0,
+                    ctx.stream().handle(),
+                ))
+                .map_err(Error::Cuda)?;
+            }
+            ctx.cublas()
+                .batched_gemm_ex_f32(
+                    CublasTranspose::None,
+                    CublasTranspose::Transpose,
+                    64,
+                    64,
+                    self.layout.key_dim,
+                    1.0,
+                    &q_norm,
+                    checked_i32(self.layout.key_dim, "GDN qk A leading dimension")?,
+                    workspace_stride,
+                    &k_norm,
+                    checked_i32(self.layout.key_dim, "GDN qk B leading dimension")?,
+                    workspace_stride,
+                    0.0,
+                    &qk_scores,
+                    checked_i32(64, "GDN qk output leading dimension")?,
+                    qk_stride,
+                    checked_i32(self.layout.value_heads, "GDN qk batch count")?,
+                )
+                .map_err(Error::Cuda)?;
+            ctx.cublas()
+                .batched_gemm_ex_f32(
+                    CublasTranspose::None,
+                    CublasTranspose::Transpose,
+                    64,
+                    64,
+                    self.layout.key_dim,
+                    1.0,
+                    &k_beta,
+                    checked_i32(self.layout.key_dim, "GDN transition A leading dimension")?,
+                    workspace_stride,
+                    &k_norm,
+                    checked_i32(self.layout.key_dim, "GDN transition B leading dimension")?,
+                    workspace_stride,
+                    0.0,
+                    &transition_scores,
+                    checked_i32(64, "GDN transition output leading dimension")?,
+                    qk_stride,
+                    checked_i32(self.layout.value_heads, "GDN transition batch count")?,
+                )
+                .map_err(Error::Cuda)?;
+            unsafe {
+                ffi::check_cuda(ffi::apxinf_qwen35_gdn_sequence_recurrent_bf16_f32(
+                    self.recurrent_current.ptr(),
+                    self.recurrent_scratch.ptr(),
+                    query.ptr(),
+                    key.ptr(),
+                    value.ptr(),
+                    a.ptr(),
+                    b.ptr(),
+                    a_log.ptr(),
+                    dt_bias.ptr(),
+                    output.ptr(),
+                    flags.ptr(),
+                    checked_i32(rows, "GDN recurrent prefill rows")?,
+                    checked_i32(self.layout.key_heads, "GDN key heads")?,
+                    checked_i32(self.layout.value_heads, "GDN value heads")?,
+                    checked_i32(self.layout.key_dim, "GDN key dimension")?,
+                    checked_i32(self.layout.value_dim, "GDN value dimension")?,
+                    workspace.ptr(),
+                    workspace_stride,
+                    qk_scores.ptr(),
+                    transition_scores.ptr(),
+                    checked_i32(chunk, "GDN chunk index")?,
+                    1,
+                    ctx.stream().handle(),
+                ))
+                .map_err(Error::Cuda)?;
+            }
+            ctx.cublas()
+                .batched_gemm_ex_f32(
+                    CublasTranspose::None,
+                    CublasTranspose::None,
+                    64,
+                    self.layout.value_dim,
+                    64,
+                    1.0,
+                    &attn,
+                    64,
+                    workspace_stride,
+                    &v_beta,
+                    checked_i32(self.layout.value_dim, "GDN v_beta leading dimension")?,
+                    workspace_stride,
+                    0.0,
+                    &transformed,
+                    checked_i32(self.layout.value_dim, "GDN transformed leading dimension")?,
+                    workspace_stride,
+                    checked_i32(self.layout.value_heads, "GDN transformed batch count")?,
+                )
+                .map_err(Error::Cuda)?;
+            ctx.cublas()
+                .batched_gemm_ex_f32(
+                    CublasTranspose::None,
+                    CublasTranspose::None,
+                    64,
+                    self.layout.key_dim,
+                    64,
+                    1.0,
+                    &attn,
+                    64,
+                    workspace_stride,
+                    &decayed_k_beta,
+                    checked_i32(self.layout.key_dim, "GDN decayed-k leading dimension")?,
+                    workspace_stride,
+                    0.0,
+                    &k_cumdecay,
+                    checked_i32(self.layout.key_dim, "GDN k-cumdecay leading dimension")?,
+                    workspace_stride,
+                    checked_i32(self.layout.value_heads, "GDN k-cumdecay batch count")?,
+                )
+                .map_err(Error::Cuda)?;
+            unsafe {
+                ffi::check_cuda(ffi::apxinf_qwen35_gdn_sequence_recurrent_bf16_f32(
+                    self.recurrent_current.ptr(),
+                    self.recurrent_scratch.ptr(),
+                    query.ptr(),
+                    key.ptr(),
+                    value.ptr(),
+                    a.ptr(),
+                    b.ptr(),
+                    a_log.ptr(),
+                    dt_bias.ptr(),
+                    output.ptr(),
+                    flags.ptr(),
+                    checked_i32(rows, "GDN recurrent prefill rows")?,
+                    checked_i32(self.layout.key_heads, "GDN key heads")?,
+                    checked_i32(self.layout.value_heads, "GDN value heads")?,
+                    checked_i32(self.layout.key_dim, "GDN key dimension")?,
+                    checked_i32(self.layout.value_dim, "GDN value dimension")?,
+                    workspace.ptr(),
+                    workspace_stride,
+                    qk_scores.ptr(),
+                    transition_scores.ptr(),
+                    checked_i32(chunk, "GDN chunk index")?,
+                    2,
+                    ctx.stream().handle(),
+                ))
+                .map_err(Error::Cuda)?;
+            }
+            ctx.cublas()
+                .batched_gemm_ex_f32(
+                    CublasTranspose::Transpose,
+                    CublasTranspose::None,
+                    self.layout.key_dim,
+                    self.layout.value_dim,
+                    64,
+                    1.0,
+                    &k_cumdecay,
+                    checked_i32(self.layout.key_dim, "GDN state-update A leading dimension")?,
+                    workspace_stride,
+                    &v_new,
+                    checked_i32(
+                        self.layout.value_dim,
+                        "GDN state-update B leading dimension",
+                    )?,
+                    workspace_stride,
+                    1.0,
+                    &self.recurrent_scratch,
+                    checked_i32(self.layout.value_dim, "GDN state-update leading dimension")?,
+                    state_stride,
+                    checked_i32(self.layout.value_heads, "GDN state-update batch count")?,
+                )
+                .map_err(Error::Cuda)?;
         }
-        let flag = read_status(ctx, &flags)?;
-        if flag != 0 {
-            return Err(status_error("GDN recurrent prefill", flag));
-        }
+        flags.finish(ctx, "GDN recurrent prefill")?;
         std::mem::swap(&mut self.recurrent_current, &mut self.recurrent_scratch);
         copy_device_buffer(&self.recurrent_scratch, &self.recurrent_backup)?;
         self.recurrent_commit_pending_rollback = true;
@@ -698,7 +1065,7 @@ pub fn gated_rms_norm_bf16(
     let gate = CudaBuffer::from_tensor(gate).map_err(Error::Cuda)?;
     let weight = CudaBuffer::from_tensor(weight).map_err(Error::Cuda)?;
     let output = alloc_zeroed(checked_bytes(rows * width, DType::BF16)?, ctx.device_id())?;
-    let flags = alloc_zeroed(size_of::<u32>(), ctx.device_id())?;
+    let flags = StatusFlags::acquire(ctx)?;
     unsafe {
         ffi::check_cuda(ffi::apxinf_qwen35_gdn_gated_rms_norm_bf16(
             input.ptr(),
@@ -714,10 +1081,7 @@ pub fn gated_rms_norm_bf16(
         ))
         .map_err(Error::Cuda)?;
     }
-    let flag = read_status(ctx, &flags)?;
-    if flag != 0 {
-        return Err(status_error("GDN gated RMSNorm", flag));
-    }
+    flags.finish(ctx, "GDN gated RMSNorm")?;
     Ok(output.into_tensor(Shape::new(vec![rows, width]), DType::BF16))
 }
 
@@ -783,7 +1147,7 @@ fn checked_workspace_floats(key_dim: usize, value_dim: usize) -> Result<usize> {
     let matrix = CHUNK
         .checked_mul(CHUNK)
         .ok_or_else(|| Error::Other("GDN workspace size overflow".into()))?;
-    qk.checked_mul(2)
+    qk.checked_mul(4)
         .and_then(|size| size.checked_add(values))
         .and_then(|size| size.checked_add(CHUNK * 2))
         .and_then(|size| size.checked_add(matrix))

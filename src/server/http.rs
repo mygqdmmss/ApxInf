@@ -1,6 +1,8 @@
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
+
+use apxinf_model::CancellationToken;
 
 use crate::server::service::{HttpResponse, ProtocolRuntime, ProtocolService};
 
@@ -49,19 +51,66 @@ pub fn handle_connection<S: ProtocolRuntime>(
         .ok()
         .and_then(|value| value.get("stream").and_then(serde_json::Value::as_bool))
         .unwrap_or(false);
+
+    // A generation can hold the only GPU capacity slot for many minutes of
+    // prefill before the first response byte is written, so a disconnect
+    // cannot be detected by write failures alone. Watch the client socket for
+    // EOF/reset on a separate thread and cancel the request the moment the
+    // client goes away; the runtime then aborts at the next prefill block or
+    // decode step and releases the capacity permit.
+    let cancel = CancellationToken::new();
+    let monitor = spawn_disconnect_monitor(&stream, cancel.clone());
+    let result = serve_generate(&mut stream, service, &request.body, wants_stream, cancel);
+    let _ = stream.shutdown(Shutdown::Both);
+    if let Some(monitor) = monitor {
+        let _ = monitor.join();
+    }
+    result
+}
+
+fn spawn_disconnect_monitor(
+    stream: &TcpStream,
+    cancel: CancellationToken,
+) -> Option<std::thread::JoinHandle<()>> {
+    let mut monitor = stream.try_clone().ok()?;
+    Some(std::thread::spawn(move || {
+        let mut sink = [0u8; 256];
+        loop {
+            match monitor.read(&mut sink) {
+                // EOF or error: the client is gone (or the handler shut the
+                // socket down after completing). Cancelling a finished
+                // request's token is a no-op.
+                Ok(0) | Err(_) => {
+                    cancel.cancel();
+                    return;
+                }
+                // Ignore stray bytes; one request per Connection: close.
+                Ok(_) => {}
+            }
+        }
+    }))
+}
+
+fn serve_generate<S: ProtocolRuntime>(
+    stream: &mut TcpStream,
+    service: &ProtocolService<S>,
+    body: &[u8],
+    wants_stream: bool,
+    cancel: CancellationToken,
+) -> std::io::Result<()> {
     if !wants_stream {
-        return write_response(&mut stream, service.handle_non_stream(&request.body));
+        return write_response(stream, service.handle_non_stream_with_cancel(body, cancel));
     }
 
-    let mut generation = match service.start_stream(&request.body) {
+    let mut generation = match service.start_stream_with_cancel(body, cancel) {
         Ok(generation) => generation,
-        Err(response) => return write_response(&mut stream, response),
+        Err(response) => return write_response(stream, response),
     };
     let first_frame = match generation.next_frame() {
         Ok(Some(frame)) => frame,
-        Ok(None) => return write_response(&mut stream, empty_response()),
+        Ok(None) => return write_response(stream, empty_response()),
         Err(error) => {
-            return write_response(&mut stream, crate::server::service::runtime_response(error))
+            return write_response(stream, crate::server::service::runtime_response(error))
         }
     };
     let headers = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n";
@@ -397,6 +446,94 @@ mod tests {
         server.join().unwrap();
         assert!(*cancelled.lock().unwrap());
         assert!(yielded.load(Ordering::Relaxed) < 20_000);
+    }
+
+    /// Runtime whose stream blocks until the request cancel token fires, so a
+    /// prompt-scale prefill window can be simulated without a GPU. `observed`
+    /// records whether cancellation arrived while the model was still working
+    /// (true) or only after it had already produced the token (false).
+    struct BlockingRuntime {
+        observed: Arc<Mutex<Option<bool>>>,
+        wait: std::time::Duration,
+    }
+
+    struct BlockingStream {
+        cancel: apxinf_model::CancellationToken,
+        observed: Arc<Mutex<Option<bool>>>,
+        wait: std::time::Duration,
+    }
+
+    impl TokenStream for BlockingStream {
+        fn next_token(&mut self) -> Result<Option<u32>, RuntimeError> {
+            let deadline = std::time::Instant::now() + self.wait;
+            while std::time::Instant::now() < deadline {
+                if self.cancel.is_cancelled() {
+                    *self.observed.lock().unwrap() = Some(true);
+                    return Err(RuntimeError::Cancelled);
+                }
+                thread::sleep(std::time::Duration::from_millis(2));
+            }
+            *self.observed.lock().unwrap() = Some(false);
+            Ok(Some(7))
+        }
+
+        fn cancel(&self) {}
+    }
+
+    impl ProtocolRuntime for BlockingRuntime {
+        fn capabilities(&self) -> RuntimeCapabilities {
+            RuntimeCapabilities::frozen_qwen35(32, 0)
+        }
+
+        fn start(&self, request: RuntimeRequest) -> Result<Box<dyn TokenStream>, RuntimeError> {
+            Ok(Box::new(BlockingStream {
+                cancel: request.cancel.clone(),
+                observed: Arc::clone(&self.observed),
+                wait: self.wait,
+            }))
+        }
+    }
+
+    fn disconnect_during_generation(body: &[u8]) -> Option<bool> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let observed = Arc::new(Mutex::new(None));
+        let service = Arc::new(crate::server::service::ProtocolService::new(
+            BlockingRuntime {
+                observed: Arc::clone(&observed),
+                wait: std::time::Duration::from_secs(3),
+            },
+            true,
+        ));
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let _ = handle_connection(stream, &service);
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .write_all(&request("POST", "/v1/evaluations/generate", body))
+            .unwrap();
+        client.flush().unwrap();
+        // Simulate a killed evaluation client: full disconnect before any
+        // response bytes arrive, while the model is still in prefill.
+        thread::sleep(std::time::Duration::from_millis(50));
+        client.shutdown(Shutdown::Both).unwrap();
+        drop(client);
+        server.join().unwrap();
+        let observed = *observed.lock().unwrap();
+        observed
+    }
+
+    #[test]
+    fn stream_disconnect_before_first_token_cancels_generation() {
+        let body = br#"{"input_ids":[1,2,3,4,5,6,7,8],"max_new_tokens":1,"temperature":0,"ignore_eos":true,"stream":true}"#;
+        assert_eq!(disconnect_during_generation(body), Some(true));
+    }
+
+    #[test]
+    fn non_stream_disconnect_before_result_cancels_generation() {
+        let body = br#"{"input_ids":[1,2,3,4,5,6,7,8],"max_new_tokens":1,"temperature":0,"ignore_eos":true,"stream":false}"#;
+        assert_eq!(disconnect_during_generation(body), Some(true));
     }
 
     #[test]

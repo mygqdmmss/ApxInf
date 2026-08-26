@@ -1,11 +1,33 @@
 use super::config::Qwen35ModelConfig;
 
-const PREFILL_CHUNK_TOKENS: usize = 64;
+const PREFILL_CHUNK_TOKENS: usize = 512;
+const MAX_PREFILL_CHUNK_TOKENS: usize = 1024;
+
+/// Tokens per bounded prefill block. Larger blocks amortize the per-block W4
+/// dequantization and give cuBLAS a larger M, at the cost of a proportionally
+/// larger attention score workspace (`heads x chunk x max_model_len x 4 B`).
+/// Measured per-token GDN layer cost on the pinned checkpoint: 94.7 us at 64
+/// rows, 40.9 us at 256, 27.5 us at 512. At `max_model_len=32768` the
+/// attention workspace is 768 MB at chunk 256 and 1536 MB at chunk 512, both
+/// inside the measured headroom (4606 MiB free with weights resident).
+/// Admission charges this per request via `request_state_bytes`, so an
+/// over-large chunk fails closed at startup rather than mid-request.
+/// Override with `APXINF_Q35_PREFILL_CHUNK`; clamped to
+/// `1..=MAX_PREFILL_CHUNK_TOKENS` so the workspace estimate stays bounded.
+pub fn prefill_chunk_tokens() -> usize {
+    std::env::var("APXINF_Q35_PREFILL_CHUNK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_PREFILL_CHUNK_TOKENS))
+        .unwrap_or(PREFILL_CHUNK_TOKENS)
+}
 
 fn prefill_ranges(prompt_tokens: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+    let chunk = prefill_chunk_tokens();
     (0..prompt_tokens)
-        .step_by(PREFILL_CHUNK_TOKENS)
-        .map(move |start| start..prompt_tokens.min(start + PREFILL_CHUNK_TOKENS))
+        .step_by(chunk)
+        .map(move |start| start..prompt_tokens.min(start + chunk))
 }
 
 fn request_capacity(
@@ -73,6 +95,8 @@ pub fn request_state_bytes(
         .and_then(|value| value.checked_mul(2))
         .and_then(|value| value.checked_mul(2))
         .ok_or_else(|| "attention KV byte estimate overflow".to_string())?;
+    // The GDN sequence path always works in fixed 64-token chunks internally,
+    // independent of the prefill block size.
     let chunk = 64usize;
     let qk = chunk
         .checked_mul(config.linear_head_dim)
@@ -97,7 +121,7 @@ pub fn request_state_bytes(
         .checked_mul(workspace_floats)
         .and_then(|value| value.checked_mul(4))
         .ok_or_else(|| "GDN prefill workspace byte estimate overflow".to_string())?;
-    let attention_chunk = PREFILL_CHUNK_TOKENS.min(max_model_len);
+    let attention_chunk = prefill_chunk_tokens().min(max_model_len);
     let attention_prefill_workspace = config
         .full_attention_heads
         .checked_mul(attention_chunk)
@@ -268,6 +292,23 @@ mod cuda_runtime {
             input_ids: &[u32],
             max_new_tokens: usize,
         ) -> Result<Qwen35CudaSession, String> {
+            self.open_with_cancel(
+                input_ids,
+                max_new_tokens,
+                &crate::runtime::CancellationToken::new(),
+            )
+        }
+
+        /// Open a session whose prefill can be aborted between bounded
+        /// 64-token blocks. A long prompt otherwise pins the GPU worker (and
+        /// the single capacity slot) for the full prefill even after the
+        /// client has disconnected.
+        pub fn open_with_cancel(
+            self: &Arc<Self>,
+            input_ids: &[u32],
+            max_new_tokens: usize,
+            cancel: &crate::runtime::CancellationToken,
+        ) -> Result<Qwen35CudaSession, String> {
             let request_capacity =
                 super::request_capacity(input_ids.len(), max_new_tokens, self.max_model_len)?;
             if let Some(token_id) = input_ids
@@ -292,7 +333,7 @@ mod cuda_runtime {
                 #[cfg(test)]
                 prefill_calls: 0,
             };
-            session.prefill(input_ids)?;
+            session.prefill(input_ids, cancel)?;
             Ok(session)
         }
 
@@ -329,7 +370,11 @@ mod cuda_runtime {
     }
 
     impl Qwen35CudaSession {
-        fn prefill(&mut self, input_ids: &[u32]) -> Result<(), String> {
+        fn prefill(
+            &mut self,
+            input_ids: &[u32],
+            cancel: &crate::runtime::CancellationToken,
+        ) -> Result<(), String> {
             if input_ids.is_empty() {
                 return Err("prefill requires at least one token".into());
             }
@@ -338,6 +383,13 @@ mod cuda_runtime {
             }
             let mut final_row = None;
             for range in super::prefill_ranges(input_ids.len()) {
+                if cancel.is_cancelled() {
+                    return Err(format!(
+                        "prefill cancelled by client disconnect at token {} of {}",
+                        range.start,
+                        input_ids.len()
+                    ));
+                }
                 let position = range.start;
                 let chunk_ids = &input_ids[range.clone()];
                 let mut hidden = self
@@ -390,6 +442,14 @@ mod cuda_runtime {
                         }
                     }
                 }
+                // In deferred-status mode this is the once-per-block
+                // synchronize that surfaces any latched non-finite flag from
+                // the 64 layers above; in eager mode it is a no-op.
+                apxinf_cuda::kernels::qwen35_gdn::drain_deferred_status(
+                    self.model.backend.context(),
+                    "GDN/attention prefill block",
+                )
+                .map_err(|error| error.to_string())?;
                 if range.end == input_ids.len() {
                     final_row = Some(row_slice(
                         &self.model.backend,
@@ -470,6 +530,13 @@ mod cuda_runtime {
                     self.position,
                 )?;
             }
+            // Deferred-status drain: one synchronize per decoded token
+            // instead of ~4 per GDN layer; no-op in eager mode.
+            apxinf_cuda::kernels::qwen35_gdn::drain_deferred_status(
+                self.model.backend.context(),
+                "GDN/attention decode token",
+            )
+            .map_err(|error| error.to_string())?;
             self.position += 1;
             self.last_input = Some(token);
             self.last_hidden = Some(hidden);
@@ -496,9 +563,11 @@ mod cuda_runtime {
                 .backend
                 .to_cpu(&logits)
                 .map_err(|error| format!("copy logits to host failed: {error}"))?;
-            logits
+            let values = logits
                 .to_f32_vec()
-                .map_err(|error| format!("decode logits failed: {error}"))
+                .map_err(|error| format!("decode logits failed: {error}"))?;
+            debug_capture_logits(&values, self.position);
+            Ok(values)
         }
     }
 
@@ -520,6 +589,38 @@ mod cuda_runtime {
             dims[1],
         )
         .map_err(|error| format!("copy hidden row {row} failed: {error}"))
+    }
+
+    fn debug_capture_logits(logits: &[f32], position: usize) {
+        let Some(directory) = std::env::var_os("APXINF_DEBUG_LOGITS_DIR") else {
+            return;
+        };
+        let mut top1 = 0usize;
+        let mut top2 = 0usize;
+        for (index, value) in logits.iter().enumerate() {
+            if *value > logits[top1] {
+                top2 = top1;
+                top1 = index;
+            } else if index != top1 && *value > logits[top2] {
+                top2 = index;
+            }
+        }
+        let margin = logits[top1] - logits[top2];
+        let path = std::path::Path::new(&directory)
+            .join(format!("service-logits-pos-{position:03}.f32.bin"));
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut bytes = Vec::with_capacity(logits.len() * std::mem::size_of::<f32>());
+        for value in logits {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let _ = std::fs::write(&path, bytes);
+        eprintln!(
+            "qwen35 debug logits position {position}: top1={top1} top2={top2} \
+             v1={:.6} v2={:.6} margin={:.6}",
+            logits[top1], logits[top2], margin
+        );
     }
 
     fn debug_capture_hidden(
@@ -636,10 +737,50 @@ mod tests {
     use super::super::config::Qwen35ModelConfig;
 
     #[test]
-    fn prefill_plan_bounds_every_block_to_64_tokens() {
-        let ranges = super::prefill_ranges(130).collect::<Vec<_>>();
-        assert_eq!(ranges, vec![0..64, 64..128, 128..130]);
-        assert!(ranges.iter().all(|range| range.len() <= 64));
+    fn prefill_plan_bounds_every_block_to_the_configured_chunk() {
+        let chunk = super::prefill_chunk_tokens();
+        assert!(chunk > 0 && chunk <= super::MAX_PREFILL_CHUNK_TOKENS);
+        // Contiguous, gapless cover of the prompt with every block bounded.
+        let tokens = chunk * 2 + 3;
+        let ranges = super::prefill_ranges(tokens).collect::<Vec<_>>();
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0].start, 0);
+        assert_eq!(ranges.last().unwrap().end, tokens);
+        for window in ranges.windows(2) {
+            assert_eq!(window[0].end, window[1].start);
+        }
+        assert!(ranges.iter().all(|range| range.len() <= chunk));
+        // A prompt shorter than one chunk is a single block.
+        assert_eq!(
+            super::prefill_ranges(chunk - 1).collect::<Vec<_>>(),
+            vec![0..chunk - 1]
+        );
+    }
+
+    #[test]
+    fn prefill_chunk_override_is_clamped_to_the_workspace_bound() {
+        // Serial test process: restore the environment before asserting so a
+        // failure cannot leak the override into other cases.
+        let restore = |previous: Option<String>| match previous {
+            Some(value) => std::env::set_var("APXINF_Q35_PREFILL_CHUNK", value),
+            None => std::env::remove_var("APXINF_Q35_PREFILL_CHUNK"),
+        };
+        let previous = std::env::var("APXINF_Q35_PREFILL_CHUNK").ok();
+
+        std::env::set_var("APXINF_Q35_PREFILL_CHUNK", "128");
+        let explicit = super::prefill_chunk_tokens();
+        std::env::set_var("APXINF_Q35_PREFILL_CHUNK", "99999");
+        let clamped = super::prefill_chunk_tokens();
+        std::env::set_var("APXINF_Q35_PREFILL_CHUNK", "0");
+        let zero_rejected = super::prefill_chunk_tokens();
+        std::env::set_var("APXINF_Q35_PREFILL_CHUNK", "not-a-number");
+        let garbage_rejected = super::prefill_chunk_tokens();
+        restore(previous);
+
+        assert_eq!(explicit, 128);
+        assert_eq!(clamped, super::MAX_PREFILL_CHUNK_TOKENS);
+        assert_eq!(zero_rejected, super::PREFILL_CHUNK_TOKENS);
+        assert_eq!(garbage_rejected, super::PREFILL_CHUNK_TOKENS);
     }
 
     #[test]
@@ -664,12 +805,15 @@ mod tests {
             + 3 * config.linear_value_heads * config.linear_head_dim * config.linear_head_dim * 4;
         let attention_per_layer =
             2 * config.full_attention_kv_heads * 32_768 * config.full_attention_head_dim * 2;
+        // The GDN scan chunk is fixed at 64 regardless of the prefill block
+        // size; the attention score workspace scales with the block size.
         let chunk = 64usize;
         let qk = chunk * config.linear_head_dim;
         let values = chunk * config.linear_head_dim;
         let matrix = chunk * chunk;
         let workspace_floats = qk * 2 + values + chunk * 2 + matrix + values + qk + values;
-        let attention_prefill_workspace = config.full_attention_heads * chunk * 32_768 * 2 * 2;
+        let attention_prefill_workspace =
+            config.full_attention_heads * super::prefill_chunk_tokens() * 32_768 * 2 * 2;
         let expected = 48 * gdn_per_layer
             + 16 * attention_per_layer
             + config.linear_value_heads * workspace_floats * 4

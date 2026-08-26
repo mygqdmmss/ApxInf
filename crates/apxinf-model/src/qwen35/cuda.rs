@@ -1647,6 +1647,538 @@ mod tests {
         assert_eq!(state.position(), 0);
     }
 
+    /// Profiling harness for layer-level prefill/decode cost attribution on a
+    /// development GPU. Not a correctness test: it loads one real GDN layer
+    /// and one real full-attention layer, then loops prefill (rows from
+    /// `APXINF_PROFILE_ROWS`, default 64) and decode so `nvprof`/`ncu` can
+    /// attribute time per kernel. Wall-clock per call is printed for
+    /// cross-checking against the measured per-block service cost.
+    #[test]
+    #[ignore = "profiling harness; requires a development GPU and the pinned checkpoint"]
+    fn real_layer_profile_harness_prefill_and_decode() {
+        let checkpoint = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
+            .map(std::path::PathBuf::from)
+            .expect("APXINF_QWEN35_CHECKPOINT must point to the pinned checkpoint");
+        let device = std::env::var("APXINF_CUDA_DEVICE")
+            .expect("APXINF_CUDA_DEVICE must select a non-formal development GPU")
+            .parse::<usize>()
+            .unwrap();
+        let rows: usize = std::env::var("APXINF_PROFILE_ROWS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(64);
+        let iters: usize = std::env::var("APXINF_PROFILE_ITERS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(8);
+        let ctx = CudaContext::new(device).expect("CUDA device required");
+        let backend = apxinf_cuda::CudaBackend::new(device).expect("CUDA backend required");
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&checkpoint, QWEN35_MODEL_REVISION)
+                .unwrap();
+        let gdn = Qwen35CudaGdnLayer::from_inventory(&ctx, &inventory, 0).unwrap();
+        let attention = Qwen35CudaFullAttentionLayer::from_inventory(&ctx, &inventory, 3).unwrap();
+
+        let values: Vec<half::bf16> = (0..rows * 5120)
+            .map(|index| half::bf16::from_f32((((index % 61) as f32) - 30.0) * 0.001))
+            .collect();
+        let host = Tensor::from_bf16(Shape::new(vec![rows, 5120]), &values).unwrap();
+        let hidden = apxinf_cuda::transfers::to_cuda(&host, device).unwrap();
+        let single = Tensor::from_bf16(Shape::new(vec![1, 5120]), &values[..5120]).unwrap();
+        let single = apxinf_cuda::transfers::to_cuda(&single, device).unwrap();
+
+        let time_section = |label: &str, mut body: Box<dyn FnMut() + '_>| {
+            // Warm up every shape/tactic (cuBLAS heuristics, allocator pools)
+            // before the timed loop so the first section is not charged for
+            // one-time initialization.
+            body();
+            ctx.synchronize().unwrap();
+            let started = std::time::Instant::now();
+            for _ in 0..iters {
+                body();
+            }
+            ctx.synchronize().unwrap();
+            let elapsed = started.elapsed();
+            eprintln!(
+                "profile {label}: rows={rows} iters={iters} total={elapsed:?} per_call={:?}",
+                elapsed / iters as u32
+            );
+        };
+
+        time_section(
+            "gdn_prefill",
+            Box::new(|| {
+                let mut state = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+                gdn.prefill(&backend, &hidden, &mut state).unwrap();
+            }),
+        );
+        time_section(
+            "attention_prefill",
+            Box::new(|| {
+                let mut state = Qwen35CudaFullAttentionState::new(&backend, rows + 2).unwrap();
+                attention.prefill(&backend, &hidden, 0, &mut state).unwrap();
+            }),
+        );
+        // Stage-level attribution inside the GDN prefill, replaying the same
+        // call sequence the layer makes so each stage can be timed alone.
+        let ctx_ref = backend.context();
+        let normalized = backend
+            .rms_norm(&hidden, &gdn.input_norm, gdn.rms_epsilon)
+            .unwrap();
+        time_section(
+            "gdn_stage_projections_in",
+            Box::new(|| {
+                gdn.in_proj_qkv.project(ctx_ref, &normalized).unwrap();
+                gdn.in_proj_z.project(ctx_ref, &normalized).unwrap();
+                gdn.in_proj_a.project(ctx_ref, &normalized).unwrap();
+                gdn.in_proj_b.project(ctx_ref, &normalized).unwrap();
+            }),
+        );
+        let qkv = gdn.in_proj_qkv.project(ctx_ref, &normalized).unwrap();
+        let a = gdn.in_proj_a.project(ctx_ref, &normalized).unwrap();
+        let b = gdn.in_proj_b.project(ctx_ref, &normalized).unwrap();
+        time_section(
+            "gdn_stage_conv_prefill",
+            Box::new(|| {
+                let mut state = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+                state
+                    .state
+                    .causal_conv_silu_prefill(ctx_ref, &qkv, &gdn.conv_weight)
+                    .unwrap();
+            }),
+        );
+        let mut conv_state = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+        let convolved = conv_state
+            .state
+            .causal_conv_silu_prefill(ctx_ref, &qkv, &gdn.conv_weight)
+            .unwrap();
+        let query_width = gdn.dimensions().query_width();
+        let value_width = gdn.dimensions().value_width();
+        let query = apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+            ctx_ref,
+            &convolved,
+            0,
+            query_width,
+        )
+        .unwrap();
+        let key = apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+            ctx_ref,
+            &convolved,
+            query_width,
+            query_width,
+        )
+        .unwrap();
+        let value = apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+            ctx_ref,
+            &convolved,
+            query_width * 2,
+            value_width,
+        )
+        .unwrap();
+        time_section(
+            "gdn_stage_delta_prefill",
+            Box::new(|| {
+                let mut state = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+                state
+                    .state
+                    .gated_delta_prefill(
+                        ctx_ref,
+                        &query,
+                        &key,
+                        &value,
+                        &a,
+                        &b,
+                        &gdn.a_log,
+                        &gdn.dt_bias,
+                    )
+                    .unwrap();
+            }),
+        );
+        let z = gdn.in_proj_z.project(ctx_ref, &normalized).unwrap();
+        let mut delta_state = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+        let recurrent = delta_state
+            .state
+            .gated_delta_prefill(
+                ctx_ref,
+                &query,
+                &key,
+                &value,
+                &a,
+                &b,
+                &gdn.a_log,
+                &gdn.dt_bias,
+            )
+            .unwrap();
+        time_section(
+            "gdn_stage_norm_out_mlp",
+            Box::new(|| {
+                let gated = gated_rms_norm_bf16(
+                    ctx_ref,
+                    &recurrent,
+                    &z,
+                    &gdn.norm,
+                    gdn.dimensions().value_heads,
+                    gdn.dimensions().value_dim,
+                    gdn.rms_epsilon,
+                )
+                .unwrap();
+                let update = gdn.out_proj.project(ctx_ref, &gated).unwrap();
+                let residual = backend.add(&hidden, &update).unwrap();
+                let mlp_input = backend
+                    .rms_norm(&residual, &gdn.post_attention_norm, gdn.rms_epsilon)
+                    .unwrap();
+                let mlp_gate = gdn.mlp_gate_proj.project(ctx_ref, &mlp_input).unwrap();
+                let mlp_up = gdn.mlp_up_proj.project(ctx_ref, &mlp_input).unwrap();
+                let mlp_hidden = backend
+                    .mul(&backend.silu(&mlp_gate).unwrap(), &mlp_up)
+                    .unwrap();
+                gdn.mlp_down_proj.project(ctx_ref, &mlp_hidden).unwrap();
+            }),
+        );
+
+        // Micro-benchmarks isolating the allocation cost hypothesis: every
+        // W4 projection currently cudaMallocs a fresh dequant scratch (up to
+        // 178 MB for the MLP shapes) plus output and flags buffers per call.
+        time_section(
+            "micro_cuda_malloc_free_178mb",
+            Box::new(|| {
+                let buffer = apxinf_cuda::CudaBuffer::alloc(178 * 1024 * 1024, device).unwrap();
+                drop(buffer);
+            }),
+        );
+        time_section(
+            "micro_cuda_malloc_free_4b",
+            Box::new(|| {
+                let buffer = apxinf_cuda::CudaBuffer::alloc(4, device).unwrap();
+                drop(buffer);
+            }),
+        );
+        time_section(
+            "micro_mlp_gate_project_only",
+            Box::new(|| {
+                gdn.mlp_gate_proj.project(ctx_ref, &normalized).unwrap();
+            }),
+        );
+
+        time_section(
+            "gdn_decode",
+            Box::new(|| {
+                let mut state = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+                gdn.decode_token(&backend, &single, &mut state).unwrap();
+            }),
+        );
+        time_section(
+            "attention_decode",
+            Box::new(|| {
+                let mut state = Qwen35CudaFullAttentionState::new(&backend, rows + 2).unwrap();
+                attention.prefill(&backend, &hidden, 0, &mut state).unwrap();
+                attention
+                    .decode_token(&backend, &single, rows, &mut state)
+                    .unwrap();
+            }),
+        );
+
+        // Service-shaped decode: the request state is created once and reused
+        // across steps, exactly like `Qwen35CudaSession`, so state-allocation
+        // cost is excluded and per-step cost is directly comparable to the
+        // measured service TPOT.
+        let mut gdn_state = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+        time_section(
+            "gdn_decode_reused_state",
+            Box::new(|| {
+                gdn.decode_token(&backend, &single, &mut gdn_state).unwrap();
+            }),
+        );
+        let capacity = rows + (iters + 1) * 4 + 8;
+        let mut attention_state = Qwen35CudaFullAttentionState::new(&backend, capacity).unwrap();
+        attention
+            .prefill(&backend, &hidden, 0, &mut attention_state)
+            .unwrap();
+        let mut attention_position = rows;
+        time_section(
+            "attn_decode_reused_state",
+            Box::new(|| {
+                attention
+                    .decode_token(&backend, &single, attention_position, &mut attention_state)
+                    .unwrap();
+                attention_position += 1;
+            }),
+        );
+
+        // Attention prefill stage attribution: the score GEMMs, the softmax
+        // and the value GEMMs are timed separately at a long kv length so the
+        // softmax kernel's per-block full-row rescan is visible.
+        {
+            let kv_len = std::env::var("APXINF_PROFILE_KV")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(4096);
+            let heads = 24usize;
+            let scores_rows = rows * heads;
+            let values: Vec<half::bf16> = (0..scores_rows * kv_len)
+                .map(|index| half::bf16::from_f32((((index % 97) as f32) - 48.0) * 0.01))
+                .collect();
+            let host = Tensor::from_bf16(Shape::new(vec![scores_rows, kv_len]), &values).unwrap();
+            let scores = apxinf_cuda::transfers::to_cuda(&host, device).unwrap();
+            time_section(
+                "attn_stage_softmax_only",
+                Box::new(|| {
+                    apxinf_cuda::kernels::attention::softmax_causal(
+                        ctx_ref,
+                        &scores,
+                        0,
+                        heads as u32,
+                    )
+                    .unwrap();
+                }),
+            );
+            eprintln!(
+                "profile attn_softmax_shape: rows={scores_rows} cols={kv_len} \
+                 elements={} redundant_block_rescans={}",
+                scores_rows * kv_len,
+                (kv_len + 255) / 256
+            );
+        }
+
+        // Attention prefill at a REALISTIC kv length. The plain
+        // `attention_prefill` section above starts from an empty cache, so its
+        // kv_len equals `rows`; in a real 16K prompt the later blocks attend
+        // over a kv cache of up to 16512, and the score/value GEMMs scale with
+        // rows x kv_len. This section pre-fills the cache and then times one
+        // additional block, which is what the service actually pays.
+        {
+            let preload = std::env::var("APXINF_PROFILE_PRELOAD")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            if preload > 0 {
+                // Time the whole staircase once: every block from 0 to
+                // `preload`, exactly as the service walks a long prompt. The
+                // per-block average then reflects the real growing kv length
+                // instead of a fixed short one. A single pass is used because
+                // the cache cursor only moves forward.
+                let mut state =
+                    Qwen35CudaFullAttentionState::new(&backend, preload + rows + 8).unwrap();
+                ctx.synchronize().unwrap();
+                let started = std::time::Instant::now();
+                let mut position = 0usize;
+                let mut blocks = 0usize;
+                while position + rows <= preload {
+                    attention
+                        .prefill(&backend, &hidden, position, &mut state)
+                        .unwrap();
+                    position += rows;
+                    blocks += 1;
+                }
+                ctx.synchronize().unwrap();
+                let elapsed = started.elapsed();
+                eprintln!(
+                    "profile attn_prefill_staircase: preload={preload} block_rows={rows} \
+                     blocks={blocks} final_kv={position} total={elapsed:?} \
+                     per_block_avg={:?}",
+                    elapsed / blocks.max(1) as u32
+                );
+
+                // Stage split for ONE block at the final (longest) kv length,
+                // which is where the staircase spends most of its time.
+                let heads = 24usize;
+                let kv_len = position;
+                let q_values: Vec<half::bf16> = (0..rows * heads * 256)
+                    .map(|i| half::bf16::from_f32((((i % 71) as f32) - 35.0) * 0.01))
+                    .collect();
+                let q_host =
+                    Tensor::from_bf16(Shape::new(vec![rows, heads, 256]), &q_values).unwrap();
+                let q_gpu = apxinf_cuda::transfers::to_cuda(&q_host, device).unwrap();
+                time_section(
+                    "attn_stage_full_sdpa_at_final_kv",
+                    Box::new(|| {
+                        backend
+                            .sdpa_prefill(
+                                &q_gpu,
+                                &mut state.cache,
+                                0,
+                                heads,
+                                4,
+                                256,
+                                kv_len,
+                                position + rows + 8,
+                            )
+                            .unwrap();
+                    }),
+                );
+                let scores_values: Vec<half::bf16> = (0..rows * heads * kv_len)
+                    .map(|i| half::bf16::from_f32((((i % 53) as f32) - 26.0) * 0.02))
+                    .collect();
+                let scores_host =
+                    Tensor::from_bf16(Shape::new(vec![rows * heads, kv_len]), &scores_values)
+                        .unwrap();
+                let scores_gpu = apxinf_cuda::transfers::to_cuda(&scores_host, device).unwrap();
+                time_section(
+                    "attn_stage_scale_only",
+                    Box::new(|| {
+                        apxinf_cuda::kernels::elementwise::scale(ctx_ref, &scores_gpu, 0.0625)
+                            .unwrap();
+                    }),
+                );
+                time_section(
+                    "attn_stage_softmax_at_final_kv",
+                    Box::new(|| {
+                        apxinf_cuda::kernels::attention::softmax_causal(
+                            ctx_ref,
+                            &scores_gpu,
+                            0,
+                            heads as u32,
+                        )
+                        .unwrap();
+                    }),
+                );
+                let scores_bytes = rows * heads * kv_len * 2;
+                time_section(
+                    "attn_stage_alloc_scores_buffer",
+                    Box::new(|| {
+                        let buffer = apxinf_cuda::CudaBuffer::alloc(scores_bytes, device).unwrap();
+                        drop(buffer);
+                    }),
+                );
+                eprintln!(
+                    "profile attn_stage_shapes: rows={rows} heads={heads} kv={kv_len} \
+                     scores_buffer={:.0} MB",
+                    scores_bytes as f64 / (1024.0 * 1024.0)
+                );
+
+                // Isolate the output-stride hypothesis: the same score GEMM
+                // written to an interleaved [seq, head, kv] layout
+                // (ldc = heads*kv, one row every 768 KB) versus a contiguous
+                // per-head [head, seq, kv] layout (ldc = kv).
+                {
+                    use apxinf_cuda::cublas::CublasTranspose;
+                    let q_buf = apxinf_cuda::CudaBuffer::from_tensor(&q_gpu).unwrap();
+                    let k_buf = apxinf_cuda::CudaBuffer::alloc(kv_len * 256 * 2, device).unwrap();
+                    let c_buf =
+                        apxinf_cuda::CudaBuffer::alloc(rows * heads * kv_len * 2, device).unwrap();
+                    let gqa = heads / 4;
+                    let run = |ldc: i32, stride_c: i64, label: &str| {
+                        time_section(
+                            label,
+                            Box::new(|| {
+                                ctx_ref
+                                    .cublas()
+                                    .batched_gemm_ex(
+                                        DType::BF16,
+                                        CublasTranspose::None,
+                                        CublasTranspose::Transpose,
+                                        rows,
+                                        kv_len,
+                                        256,
+                                        1.0,
+                                        &q_buf,
+                                        (heads * 256) as i32,
+                                        256,
+                                        &k_buf,
+                                        256,
+                                        0,
+                                        0.0,
+                                        &c_buf,
+                                        ldc,
+                                        stride_c,
+                                        gqa as i32,
+                                    )
+                                    .unwrap();
+                            }),
+                        );
+                    };
+                    run(
+                        (heads * kv_len) as i32,
+                        kv_len as i64,
+                        "attn_micro_gemm_interleaved_ldc",
+                    );
+                    run(
+                        kv_len as i32,
+                        (rows * kv_len) as i64,
+                        "attn_micro_gemm_contiguous_ldc",
+                    );
+                }
+            }
+        }
+
+        // Decode-shape stage attribution inside one GDN layer.
+        let normalized_1 = backend
+            .rms_norm(&single, &gdn.input_norm, gdn.rms_epsilon)
+            .unwrap();
+        time_section(
+            "dec_stage_in_projections",
+            Box::new(|| {
+                gdn.in_proj_qkv.project(ctx_ref, &normalized_1).unwrap();
+                gdn.in_proj_z.project(ctx_ref, &normalized_1).unwrap();
+                gdn.in_proj_a.project(ctx_ref, &normalized_1).unwrap();
+                gdn.in_proj_b.project(ctx_ref, &normalized_1).unwrap();
+            }),
+        );
+        time_section(
+            "dec_stage_mlp_projections",
+            Box::new(|| {
+                let g = gdn.mlp_gate_proj.project(ctx_ref, &normalized_1).unwrap();
+                let u = gdn.mlp_up_proj.project(ctx_ref, &normalized_1).unwrap();
+                let h = backend.mul(&backend.silu(&g).unwrap(), &u).unwrap();
+                gdn.mlp_down_proj.project(ctx_ref, &h).unwrap();
+            }),
+        );
+        let mlp_hidden_1 = {
+            let g = gdn.mlp_gate_proj.project(ctx_ref, &normalized_1).unwrap();
+            let u = gdn.mlp_up_proj.project(ctx_ref, &normalized_1).unwrap();
+            backend.mul(&backend.silu(&g).unwrap(), &u).unwrap()
+        };
+        time_section(
+            "dec_stage_mlp_down_only",
+            Box::new(|| {
+                gdn.mlp_down_proj.project(ctx_ref, &mlp_hidden_1).unwrap();
+            }),
+        );
+        time_section(
+            "dec_stage_mlp_gate_only",
+            Box::new(|| {
+                gdn.mlp_gate_proj.project(ctx_ref, &normalized_1).unwrap();
+            }),
+        );
+        let mut conv_state_1 = Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap();
+        let qkv_1 = gdn.in_proj_qkv.project(ctx_ref, &normalized_1).unwrap();
+        time_section(
+            "dec_stage_conv_step",
+            Box::new(|| {
+                conv_state_1
+                    .state
+                    .causal_conv_silu(ctx_ref, &qkv_1, &gdn.conv_weight)
+                    .unwrap();
+            }),
+        );
+
+        // LM head projection at decode shape [1, 5120] -> [1, 248320]: BF16
+        // GEMV over ~2.4 GiB of weights, plus the D2H logits copy and host
+        // argmax the session performs per token.
+        let lm_payload = inventory
+            .read_bf16_tensor_payload(
+                "lm_head.weight",
+                &[inventory.config.vocab_size, inventory.config.hidden_size],
+            )
+            .unwrap();
+        let lm_head = Qwen35Bf16Projection::from_payload(ctx_ref, &lm_payload).unwrap();
+        time_section(
+            "lm_head_project_only",
+            Box::new(|| {
+                lm_head.project(ctx_ref, &single).unwrap();
+            }),
+        );
+        time_section(
+            "lm_head_project_d2h_argmax",
+            Box::new(|| {
+                let logits = lm_head.project(ctx_ref, &single).unwrap();
+                let cpu = apxinf_cuda::transfers::to_cpu(&logits).unwrap();
+                let values = cpu.to_f32_vec().unwrap();
+                let _ = crate::qwen35::model::greedy_argmax(&values, values.len()).unwrap();
+            }),
+        );
+    }
+
     #[test]
     #[ignore = "requires GPU2 and the pinned Qwen3.5 checkpoint payload"]
     fn real_full_attention_layer_three_owns_all_checkpoint_weights_on_cuda() {
