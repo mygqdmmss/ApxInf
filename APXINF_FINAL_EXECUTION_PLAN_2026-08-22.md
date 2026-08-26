@@ -8,11 +8,15 @@
 >
 > 相关三套路线的完整技术比较见 [APXINF_QWEN38_TECHNICAL_PLANS.md](APXINF_QWEN38_TECHNICAL_PLANS.md)。本文件是实际执行时的唯一主线方案。
 
+> **实际分工订正（2026-08-26 据 git 记录）**：本项目为两人团队。本文写于 8/22，其中的多 lane 分工是事前规划。实际执行中，**程仁龙**（`mygqdmmss`，成员1）承担约 **95%** 的工作，涵盖原规划中分派给成员2的 protocol surface / oracle / hidden 代理集，以及实验 lane 的 CUDA kernel 优化 / benchmark campaign / 显存账本 / REPORT。**王天民**（`wang1145140503`，成员2）承担约 **5%**，交付 `scripts/campaign/` 与 `benchmarks/campaign/manifests/` 下的离线 benchmark 脚手架、shape inventory 与 experiment validator，未进入服务/模型主线。
+>
+> 因此下文所有"成员2"及实验 lane 的职责段落，除王天民上述离线脚手架外，实际均由程仁龙承担；文中"多卡逻辑 lane / 带锁队列 / 多人并行"的组织方式在实际执行中退化为单人串行推进，服务器带锁队列（`flock /tmp/apxinf-gpu-job.lock`）与单卡正式重放的纪律仍然严格执行。保留原文是为记录规划与执行的偏差。
+
 ## 1. 结论先行
 
-最终采用一条“先取得资格、再按分/人时优化”的主线。当前 starter 仓库并没有 Qwen3.5、W4A16、GDN 或 HTTP/SSE 服务实现，因此不能把四周级别的完整系统路线当成两天内的默认承诺：
+最终采用一条“先取得资格、再按分/人时优化”的主线。当前 starter 仓库并没有 Qwen3.8、W4A16、GDN 或 HTTP/SSE 服务实现，因此不能把四周级别的完整系统路线当成两天内的默认承诺：
 
-1. 成员2负责离线 oracle 生成器、协议 stub、checkpoint manifest 和 synthetic W4 fixture；成员3并行负责 shape inventory、最小算子测试和 benchmark/replay harness。需要真实 checkpoint 的 oracle 执行由成员1在服务器带锁队列中一次完成。当前 transformers/vLLM 仅提供 Qwen3Next 相近实现，必须做 checkpoint-specific 适配并逐层对拍，不能把相近模型直接当权威 oracle；没有完成选择性 golden 生成就不进入大规模 Rust/CUDA 调试。
+1. 成员2负责离线 oracle 生成器、协议 stub、checkpoint manifest 和 synthetic W4 fixture；实验 lane 并行负责 shape inventory、最小算子测试和 benchmark/replay harness。需要真实 checkpoint 的 oracle 执行由成员1在服务器带锁队列中一次完成。当前 transformers/vLLM 仅提供 Qwen3Next 相近实现，必须做 checkpoint-specific 适配并逐层对拍，不能把相近模型直接当权威 oracle；没有完成选择性 golden 生成就不进入大规模 Rust/CUDA 调试。
 2. 成员1负责一条可回滚的模型/runtime 主线：W4 解包/反量化、GDN 语义、full attention 特殊语义、GPU worker/状态适配和最终集成。成员2独立负责完整的 protocol surface（stub、schema、`/health`、admission、SSE/JSON、错误映射和恢复验收），再由成员1把真实模型 runtime 接入这份已测试的接口；这样协议资格闸不会与核心 forward 调试相互阻塞。GDN 先保留逐 token eager 路径作为 correctness fallback；chunk-scan 是后续性能路径，不能成为取得资格的唯一前置条件。
 3. 只把已证明的窄优化接入主线：prefill 先用 BF16 scratch + cuBLASLt，decode 再比较直读 packed-W4 GEMV；CUDA Graph 只覆盖已冻结 decode bucket；MTP 是 base TPOT/C4 goodput 的条件性实验，不是独立 bonus 或默认交付项，只有 target decoder 冻结后先做 K=1 feasibility probe 且端到端净收益成立才接入。
 4. 本地代码准备可以并行；服务器只有一个账号，所有真实 GPU/模型任务进入一个带 `flock` 的队列，不能四卡同时常驻模型。队列优先级为：一次性 oracle（GPU1 logical lane）→ GPU0 runtime/eligibility 集成与正式重放 → GPU2 kernel/profile replay → GPU3 context/C4/C8/vision/MTP replay。GPU0 正式测量必须独占、锁频/记录温度功耗；最终成绩只在固定 GPU0 UUID 上重放。
@@ -89,12 +93,12 @@
 
 | 模块 | 责任 | 第一责任人 |
 |---|---|---|
-| `apxinf-loader` | safetensors shard/index、revision/shape/dtype 校验、W4 metadata、lazy/mmap | Agent B |
-| `apxinf-model/qwen35` | nested config、64 层执行、GDN/attention、request state、graph orchestration | 成员1 |
-| `apxinf-cuda` | W4A16、GDN、RoPE、norm、FA2、KV/page、graph primitive | 成员1 + Agent C |
-| `server`/`main.rs` | 协议 schema、`/health`、SSE/JSON、HTTP/schema admission、HTTP 错误映射、stub 和恢复负控 | 成员2（协议 owner）；成员1负责 GPU device-budget admission、runtime adapter/worker 接入与最终集成 |
-| `scripts/campaign` | 多卡编排、paired A/B、环境与 artifact hash | Agent C |
-| `REPORT.md` | baseline、假设、结果、负结果、复现、回滚 | Agent C 汇总，成员1裁决 |
+| `apxinf-loader` | safetensors shard/index、revision/shape/dtype 校验、W4 metadata、lazy/mmap | 规划 Agent B → **实际：程仁龙** |
+| `apxinf-model/qwen35` | nested config、64 层执行、GDN/attention、request state、graph orchestration | 程仁龙 |
+| `apxinf-cuda` | W4A16、GDN、RoPE、norm、FA2、KV/page、graph primitive | 规划 成员1 + Agent C → **实际：程仁龙** |
+| `server`/`main.rs` | 协议 schema、`/health`、SSE/JSON、HTTP/schema admission、HTTP 错误映射、stub 和恢复负控 | 规划 成员2 → **实际：程仁龙**（含 device-budget admission、runtime adapter 接入与最终集成） |
+| `scripts/campaign` | 多卡编排、paired A/B、环境与 artifact hash | 离线脚手架由**王天民**交付（8/23）；实际 A/B 编排与执行由程仁龙完成 |
+| `REPORT.md` | baseline、假设、结果、负结果、复现、回滚 | 程仁龙 |
 
 不要把 Qwen3.8/Qwen3.5 的层序、GDN state 或 decode workspace 硬编码到通用 backend。checkpoint 的 `architecture` 是 `Qwen3_5ForConditionalGeneration`，目录和实现必须以真实 config/tensor 为准，而不是仅按模型商品名猜结构。当前 starter 仓库没有 qwen35、W4A16、GDN 或 HTTP/SSE；这些是新增 vertical slice，不是已有模块的简单接线。
 
@@ -270,7 +274,7 @@ nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version --format=csv
 |---|---|---|---|
 | GPU0 | 成员1集成、单卡最终候选、最终重放 | 主线集成和最终服务 | 正式 job；只跑一个候选 |
 | GPU1 | 一次性 oracle/正确性 replay | 真实 checkpoint 的选择性 layer golden 和 manifest | oracle job 完成后释放；不要求完整 BF16 常驻 |
-| GPU2 | 成员3 SM89 kernel/Nsight replay | `apxinf-cuda` 候选和 profile 脚本 | 排队执行一个 profile；保存 `.ncu-rep/.nsys-rep` |
+| GPU2 | 实验 lane SM89 kernel/Nsight replay | `apxinf-cuda` 候选和 profile 脚本 | 排队执行一个 profile；保存 `.ncu-rep/.nsys-rep` |
 | GPU3 | context/C4/C8/vision/MTP replay | benchmark harness、vision 适配和 bonus 分支 | `BASE_GOOD` 后排队执行；不得修改 scorer |
 
 服务器队列规则：所有真实模型/GPU job 先取得 `flock /tmp/apxinf-gpu-job.lock`，记录
@@ -283,8 +287,8 @@ nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version --format=csv
 
 1. `P0 oracle`：成员2 generator 的真实 checkpoint 选择性 golden，一次性完成；
 2. `P1 base`：成员1 GPU0 runtime、protocol、correctness、reliability 和 recovery；
-3. `P2 kernel`：成员3 GPU2 的单变量 paired A/B/profile；
-4. `P3 bonus`：成员3 GPU3 的 context/C4/C8/vision/MTP replay。
+3. `P2 kernel`：实验 lane GPU2 的单变量 paired A/B/profile；
+4. `P3 bonus`：实验 lane GPU3 的 context/C4/C8/vision/MTP replay。
 
 同一优先级按提交顺序执行；运行中的 job 不被并发抢占。artifact 统一写入
 `/mnt/chuangxin/team2/artifacts/apxinf/<date>/<commit-sha>/<queue-id>/`。
@@ -314,24 +318,33 @@ nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version --format=csv
 
 接受、拒绝和无结论的结果都保留；不删除“失败实验”。这同时服务于 PR review 的分析分和下一轮 Agent 的上下文。
 
-## 8. 三人协作、Git 和 Agent Prompt
+## 8. 团队协作、Git 和 Agent Prompt
 
 ### 8.1 责任边界
+
+下表为 8/22 的**原始规划**，实际承担情况见其后的订正表。
 
 | 人员 | 角色 | 可直接负责 | 不可自行决定 |
 |---|---|---|---|
 | 成员1 | 架构裁决与 runtime 集成 | qwen35 model/state、层级 kernel/FFI 合入、GPU worker/状态适配、GPU0、最终 SHA、开关和回滚 | 不独自重新设计协议；不在无证据时开启 bonus 或改合同 |
 | 成员 2 | Agent B：协议/正确性 owner | 完整 HTTP/SSE/JSON surface、stub、schema、`/health`、admission、错误恢复、loader/reference、协议负控和故障注入 | 不改核心 forward、CUDA kernel、scorer；只通过稳定 runtime adapter 接入模型 |
-| 成员 3 | Agent C：实验/性能/报告 | campaign、Nsight、benchmark、显存账本、REPORT、bonus lane | 不把 profile 数字直接宣称为端到端成绩 |
+| 实验 lane | Agent C：实验/性能/报告 | campaign、Nsight、benchmark、显存账本、REPORT、bonus lane | 不把 profile 数字直接宣称为端到端成绩 |
 
-成员 2、3 不需要理解全仓库；每次只收到一个 bounded prompt、一个分支、一个 GPU、一个验收命令和一个交付模板。
+**实际承担（据 git 记录订正）**
+
+| 人员 | 贡献占比 | 实际交付 |
+|---|---:|---|
+| **程仁龙**（成员1） | **约 95%** | Qwen3.8-27B config/loader/weights、48 层 GDN 与 16 层全注意力 CUDA 实现、W4A16 解包与 GEMM/GEMV kernel、HTTP/SSE 协议 surface 与全部负控、admission 与断连取消、oracle 生成与 hidden 代理集、十七次配对性能实验、显存账本、REPORT.md、最终集成与提交 |
+| 王天民（成员 2） | 约 5% | `scripts/campaign/shape_inventory.py`、`scripts/campaign/validate_experiment.py`、`benchmarks/campaign/` 下的 manifest 与 README、`docs/collaboration/records/` 的交接记录 |
+
+原规划中"各领一个 bounded prompt、一个分支、一个 GPU"的并行组织方式未能落地，实际退化为单人串行推进；但服务器带锁队列与单卡正式重放的纪律始终执行。
 
 ### 8.2 分支规约
 
 ```text
 contest/main                 # 只由成员1更新
 agent/b/correctness/*        # 成员 2
-agent/c/benchmark/*          # 成员 3
+agent/c/benchmark/*          # 实验 lane
 agent/cuda/<run-id>          # kernel 单实验分支
 ```
 
@@ -374,7 +387,7 @@ GPU：只使用已分配的 GPU UUID；不要使用其他 GPU。
 - 是否建议 cherry-pick：YES/NO，以及理由
 ```
 
-### 8.4 发给成员 3 的 Prompt 模板
+### 8.4 实验 lane 的 Prompt 模板
 
 ```text
 你是 ApxInf Agent C，职责是实验编排、profiling、bonus 测量和证据，不直接猜测模型语义。
@@ -416,14 +429,14 @@ GPU：只使用分配的 GPU UUID；端口和日志目录必须独立。
 
 | 时间 | 本地并行开发（成员2/3） | 服务器队列 job（一次只运行一个） | 成员1集成动作 | 共同门禁 |
 |---|---|---|---|---|
-| 8/22 上午 | 成员2写 oracle/protocol skeleton 和 synthetic W4 fixture；成员3准备 shape inventory、benchmark runner | `P0 oracle-prep`：核对 GPU/模型/合同 hash、建立 artifact 目录 | 固定 `feat/qwen35-runtime` 和 adapter 边界 | `test.py check`、clean build 基线 |
-| 8/22 下午 | 成员2完成 oracle generator、12 题 synthetic proxy、6 个 public golden schema；成员3完成 paired harness | `P0 oracle`：执行选择性 layer golden，保存 manifest/hidden state schema | 审核 oracle 输出格式，准备 loader hard gate | oracle artifact 可消费；stub 可探测 |
-| 8/22 晚间 | 成员2完成 HTTP/SSE stub、schema/admission/恢复；成员3完成 1K/8K timing harness | `P1 protocol-smoke`：在真实服务接线后重放七项 gate和 8-token recovery | 提供最小 runtime adapter contract | protocol gate、接口证据、首个阻塞点可复核 |
-| 8/23 上午 | 成员2整理 layer golden 对照和 loader manifest；成员3整理 GDN/FA2 profile 配置 | `P1 base-layer`：逐层/逐状态 correctness replay | 接入 loader、W4 dequant→BF16 GEMM 和 vertical slice | 单层 reference 对齐；不宣称完整模型 |
-| 8/23 下午 | 成员2跑 public/hidden proxy 与协议 regression；成员3准备单变量 kernel candidate | `P1 base-eval`：eager GDN、full-attention gate、recovery | 接入 64 层文本执行器、state/cancel | public correctness、failure recovery 可测 |
-| 8/23 晚间 | 成员2冻结 oracle/protocol artifact；成员3冻结 paired A/B replay 包 | `P2 kernel`：只跑已通过 correctness 的单变量 GEMV/Graph candidate | 审核是否进入 BASE_GOOD 候选 | base cell 初测、warmup 1 + measured 5、CV <= 10% |
-| 8/24 00:00-12:00 | 成员2完善负控/恢复限制；成员3整理失败实验和报告 | `P1 final-base`，必要时再排 `P2/P3`，不并发启动 | 只修资格/reliability，不开新架构 | public 6/6、hidden >=11/12、protocol、success 目标 |
-| 8/24 12:00-17:00 | 两名远程成员从冻结 SHA 生成 replay 包和报告片段 | `P1 clean-replay`：从 clean checkout 重跑最小 smoke | 冻结中期 SHA、服务命令和 artifact | 所有产物由冻结 SHA 生成 |
+| 8/22 上午 | 成员2写 oracle/protocol skeleton 和 synthetic W4 fixture；实验 lane 准备 shape inventory、benchmark runner | `P0 oracle-prep`：核对 GPU/模型/合同 hash、建立 artifact 目录 | 固定 `feat/qwen35-runtime` 和 adapter 边界 | `test.py check`、clean build 基线 |
+| 8/22 下午 | 成员2完成 oracle generator、12 题 synthetic proxy、6 个 public golden schema；实验 lane 完成 paired harness | `P0 oracle`：执行选择性 layer golden，保存 manifest/hidden state schema | 审核 oracle 输出格式，准备 loader hard gate | oracle artifact 可消费；stub 可探测 |
+| 8/22 晚间 | 成员2完成 HTTP/SSE stub、schema/admission/恢复；实验 lane 完成 1K/8K timing harness | `P1 protocol-smoke`：在真实服务接线后重放七项 gate和 8-token recovery | 提供最小 runtime adapter contract | protocol gate、接口证据、首个阻塞点可复核 |
+| 8/23 上午 | 成员2整理 layer golden 对照和 loader manifest；实验 lane 整理 GDN/FA2 profile 配置 | `P1 base-layer`：逐层/逐状态 correctness replay | 接入 loader、W4 dequant→BF16 GEMM 和 vertical slice | 单层 reference 对齐；不宣称完整模型 |
+| 8/23 下午 | 成员2跑 public/hidden proxy 与协议 regression；实验 lane 准备单变量 kernel candidate | `P1 base-eval`：eager GDN、full-attention gate、recovery | 接入 64 层文本执行器、state/cancel | public correctness、failure recovery 可测 |
+| 8/23 晚间 | 成员2冻结 oracle/protocol artifact；实验 lane 冻结 paired A/B replay 包 | `P2 kernel`：只跑已通过 correctness 的单变量 GEMV/Graph candidate | 审核是否进入 BASE_GOOD 候选 | base cell 初测、warmup 1 + measured 5、CV <= 10% |
+| 8/24 00:00-12:00 | 成员2完善负控/恢复限制；实验 lane 整理失败实验和报告 | `P1 final-base`，必要时再排 `P2/P3`，不并发启动 | 只修资格/reliability，不开新架构 | public 6/6、hidden >=11/12、protocol、success 目标 |
+| 8/24 12:00-17:00 | 远程成员从冻结 SHA 生成 replay 包和报告片段 | `P1 clean-replay`：从 clean checkout 重跑最小 smoke | 冻结中期 SHA、服务命令和 artifact | 所有产物由冻结 SHA 生成 |
 | 8/24 17:00-19:00 | 备份 PR/raw artifact，不再改集成文件 | 队列清空后只做 final dry-run；不得启动新长任务 | 打 tag、发布 bundle 清单 | 19:00 后不改中期 cohort |
 
 中期明确不做：MTP、prefix cache、262K/INT4 KV、复杂 vision 集成、全模型 mega-kernel、prefill offline autotune。它们不能阻塞中期 SHA；多模态只保留协议 fail-closed 和可行性记录。
@@ -546,4 +559,4 @@ python3 benchmarks/qwen38_4090/evaluation/test.py run \
 
 ## 14. 一句话决策
 
-成员1只维护一条可回滚的模型/runtime eligibility 主线并负责最终集成；成员2完整拥有 protocol surface、stub、负控/恢复验收和 oracle generator/hidden 证据；成员3只做已正确 vertical slice 的 decode/bonus 测量。本地代码准备可并行，服务器真实 GPU/模型任务由带锁队列按 oracle → GPU0 base → GPU2 kernel → GPU3 bonus 顺序执行，GPU0 正式 campaign 独占并单卡裁决。先拿到 public 6/6、hidden >=11/12、完整 protocol gate、五项 reliability boolean 和 99% success，再按分/人时打开 decode graph、65K/131K、C4、MTP K=1 probe、C8 和多模态；prefix cache、262K/INT4 KV、mega-kernel 不进入默认交付范围。
+成员1只维护一条可回滚的模型/runtime eligibility 主线并负责最终集成；成员2完整拥有 protocol surface、stub、负控/恢复验收和 oracle generator/hidden 证据；实验 lane 只做已正确 vertical slice 的 decode/bonus 测量。本地代码准备可并行，服务器真实 GPU/模型任务由带锁队列按 oracle → GPU0 base → GPU2 kernel → GPU3 bonus 顺序执行，GPU0 正式 campaign 独占并单卡裁决。先拿到 public 6/6、hidden >=11/12、完整 protocol gate、五项 reliability boolean 和 99% success，再按分/人时打开 decode graph、65K/131K、C4、MTP K=1 probe、C8 和多模态；prefix cache、262K/INT4 KV、mega-kernel 不进入默认交付范围。

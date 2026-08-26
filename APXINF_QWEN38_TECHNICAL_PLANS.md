@@ -6,11 +6,22 @@
 >
 > 文档性质：实现前的技术决策、执行计划与验收规范
 >
-> 目标：三套方案描述不同的高分优化路径；它们共享同一个 correctness/service 底座，实际执行以“先 eligible、再按分/人时优化”为准。当前 starter 尚未实现 Qwen3.5、W4A16、GDN 或 HTTP/SSE，因此不能把所有 bonus 视为本期默认交付，也不能把三套 lane 当成三条独立全栈项目。
+> 目标：三套方案描述不同的高分优化路径；它们共享同一个 correctness/service 底座，实际执行以“先 eligible、再按分/人时优化”为准。当前 starter 尚未实现 Qwen3.8、W4A16、GDN 或 HTTP/SSE，因此不能把所有 bonus 视为本期默认交付，也不能把三套 lane 当成三条独立全栈项目。
 
 > 执行入口：结合 `Agent4System-0820.pdf`、多卡实验环境和 2026-08-24/27 截止时间后的单主线执行方案见 [APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md](APXINF_FINAL_EXECUTION_PLAN_2026-08-22.md)。本文件保留三条高分路线的技术比较；实际合入、分工和冻结以执行入口为准。
 
-> 协作裁决：成员1维护唯一可回滚的模型/runtime eligibility 主线并负责最终集成；成员2拥有完整 protocol surface、stub、负控/恢复验收，以及 oracle 生成器/hidden 代理集证据；成员3负责已正确 vertical slice 的 CUDA/benchmark/bonus 实验。代码准备可并行，但服务器真实 GPU/模型任务进入带锁队列；正式成绩只以 GPU0 的单卡重放为准。
+> 协作裁决（2026-08-22 原始规划）：成员1维护唯一可回滚的模型/runtime eligibility 主线并负责最终集成；成员2拥有完整 protocol surface、stub、负控/恢复验收，以及 oracle 生成器/hidden 代理集证据；另设一条实验 lane 负责已正确 vertical slice 的 CUDA/benchmark/bonus 实验。代码准备可并行，但服务器真实 GPU/模型任务进入带锁队列；正式成绩只以 GPU0 的单卡重放为准。
+
+> **实际执行情况（2026-08-26 据 git 记录订正）**：本项目为两人团队，上述分工是 8/22 的事前规划，实际执行偏离较大。按 `git log` 统计：
+>
+> | 成员 | 贡献占比 | 实际承担 |
+> |---|---:|---|
+> | **程仁龙**（`mygqdmmss`，成员1） | **约 95%** | 模型/runtime 主线、CUDA kernel、protocol surface、oracle 与 hidden 代理集、性能实验、显存账本、REPORT 与最终集成 |
+> | 王天民（`wang1145140503`，成员2） | 约 5% | 离线 benchmark 脚手架（shape inventory、experiment validator、campaign manifest 与交接记录） |
+>
+> 即原规划中分派给成员2的 protocol surface、oracle 生成与 hidden 代理集，以及实验 lane 的 CUDA kernel 优化、benchmark campaign、显存账本与 REPORT，实际均由程仁龙完成；王天民的提交集中在 `scripts/campaign/` 与 `benchmarks/campaign/manifests/` 的离线脚手架，未进入服务/模型主线。
+>
+> 因此本文与执行入口文档中所有"成员2"及实验 lane 的职责描述，**除上表列出的离线脚手架外，实际均由程仁龙承担**。保留原始分工文本是为了记录规划与执行的差异（这本身是提交材料要求的"设计变化及影响的执行阶段"），不代表实际分工。
 
 ---
 
@@ -18,7 +29,7 @@
 
 本任务不是三条独立全栈路线的等量三选一。三案共享一个必须从零建立的 correctness/service 底座；真正可执行的组织方式是“一条主线 + 两个受限优化 lane”。
 
-1. **方案一：成熟算子混合主线**。以 cuBLASLt/CUTLASS、FA2 和现有 ApxInf CUDA 能力为主，先补 W4A16、GDN 语义（逐 token eager 资格路径，再接 chunk-scan 性能路径）和 Qwen3.5 特殊 attention；协议 surface 由成员2独立完成并验收，成员1负责 runtime adapter/worker 集成。它不是“保底版”，而是两天内最现实的资格主线。
+1. **方案一：成熟算子混合主线**。以 cuBLASLt/CUTLASS、FA2 和现有 ApxInf CUDA 能力为主，先补 W4A16、GDN 语义（逐 token eager 资格路径，再接 chunk-scan 性能路径）和 Qwen3.8 特殊 attention；协议 surface 由成员2独立完成并验收，成员1负责 runtime adapter/worker 集成。它不是“保底版”，而是两天内最现实的资格主线。
 2. **方案二：SM89 窄特化实验 lane**。只针对 M=1 packed-W4 GEMV、已正确的 GDN decode 融合和 CUDA Graph 做 A/B；不把 prefill offline autotune、persistent mega-kernel 当作前置条件。
 3. **方案三：状态/内存协同实验 lane**。优先 paged KV、C4/C8 和条件性 MTP；MTP 属于 base TPOT/C4 goodput 优化而非独立 bonus，先在 target decoder 冻结后做 K=1 feasibility probe；prefix state cache、262K/INT4 KV 默认砍掉，只有主线提前冻结且有合规证据才重开。
 
@@ -162,13 +173,13 @@ roofline 账本：合同给出的冻结代理 54 GFLOP/token 在 16K prefill 约
 
 文本 eligibility 必须新增或大幅扩展：
 
-- Qwen3.5 混合主干的 config、loader、48 个 GDN 层、16 个 full-attention 层和请求状态。
+- Qwen3.8 混合主干的 config、loader、48 个 GDN 层、16 个 full-attention 层和请求状态。
 - compressed-tensors W4A16 asymmetric group-32 的 loader、weight view/packing 和 GEMM。
 - 评测需要的 HTTP `/health`、`/v1/evaluations/generate`、严格 SSE 和错误恢复；starter 当前没有 HTTP/SSE 依赖或服务骨架，必须作为独立 vertical slice 从零加入。
 
 文本主线冻结后再逐项打开的可选得分扩展：
 
-- 65K/131K 长上下文的内存方案、C4/C8 调度、Qwen3.5 多模态适配。
+- 65K/131K 长上下文的内存方案、C4/C8 调度、Qwen3.8 多模态适配。
 - MTP exact-verify 状态机；prefix state cache 默认不做。
 
 ---
@@ -198,7 +209,7 @@ roofline 账本：合同给出的冻结代理 54 GFLOP/token 在 16K prefill 约
 
 以下是可选 lane 的文件边界，不属于取得文本 eligibility 的共同底座：`qwen35/decode_graph.rs`（验证后接入的 CUDA Graph）、`qwen35/vision.rs`（多模态）、`qwen35/mtp.rs`（MTP exact verify）和 `qwen35/cache.rs`（默认关闭的 prefix cache 审计实验）。
 
-项目现有设计要求“模型结构在 `apxinf-model`、单 kernel API 在 backend、CUDA Graph 构造由模型拥有”。因此不能把 Qwen3.5 层序和 workspace 硬编码进通用 CUDA backend，也不能把混合主干塞进现有 `qwen3vl` 目录。目录名称实现时应以 checkpoint 的 `qwen3_5` 为准，本文统一写作 `qwen35` 以避免小数点路径歧义。
+项目现有设计要求“模型结构在 `apxinf-model`、单 kernel API 在 backend、CUDA Graph 构造由模型拥有”。因此不能把 Qwen3.8 层序和 workspace 硬编码进通用 CUDA backend，也不能把混合主干塞进现有 `qwen3vl` 目录。目录名称实现时应以 checkpoint 的 `qwen3_5` 为准，本文统一写作 `qwen35` 以避免小数点路径歧义。
 
 ### 4.2 正确性金字塔
 
@@ -273,7 +284,7 @@ APXINF_Q35_MULTIMODAL={0,1}
 
 ### 5.1 路线定义
 
-该方案的核心是最大限度利用已验证的 CUTLASS、cuBLASLt、FA2、CUDA Graph 和现有 ApxInf kernel，通过离线权重 manifest/重排和少量 Qwen3.5 专用 kernel 获得高性能。新增 kernel 只解决成熟库不能直接表达或明显低效的部分：compressed-tensors W4A16 asymmetric group-32、GDN recurrent update、必要的 fused epilogue 和 paged KV。
+该方案的核心是最大限度利用已验证的 CUTLASS、cuBLASLt、FA2、CUDA Graph 和现有 ApxInf kernel，通过离线权重 manifest/重排和少量 Qwen3.8 专用 kernel 获得高性能。新增 kernel 只解决成熟库不能直接表达或明显低效的部分：compressed-tensors W4A16 asymmetric group-32、GDN recurrent update、必要的 fused epilogue 和 paged KV。
 
 它不是保守低分方案。它保留基础 100、context 10、C4/C8 10、multimodal 10 和 PR review 20 的上限，但每个 bonus 独立验收、独立报告，不把“全部 bonus 均通过”当作主线硬门；优势是每个组件都有独立 reference 与替代实现，出错时能局部回滚。
 
@@ -291,7 +302,7 @@ APXINF_Q35_MULTIMODAL={0,1}
 
 - GDN prefill 先实现逐 token eager/single-step reference-compatible 路径，作为 public/hidden correctness fallback；随后采用 chunk scan：projection 用成熟 GEMM，causal conv + recurrent delta update 用专用 CUDA kernel。chunk 边界 state checksum 必须与 eager 对齐，chunk-scan 失败时回退 eager。
 - GDN decode 用常驻 state 的单 token kernel，融合 conv ring-buffer update、gate、delta update 和输出规整，避免 48 层中大量小 kernel。
-- 16 个 full-attention 层复用 FA2 prefill；decode 复用现有 flash attention/GQA kernel，补齐 QK norm、Qwen3.5 RoPE 和 KV page append。
+- 16 个 full-attention 层复用 FA2 prefill；decode 复用现有 flash attention/GQA kernel，补齐 QK norm、Qwen3.8 RoPE 和 KV page append。
 - decode graph 按 batch 1/4/8 和 position/KV page bucket 预捕获，图外只更新 token、position、request slot 和 page-table 指针。
 
 **内存、bonus 与视觉**
@@ -325,7 +336,7 @@ APXINF_Q35_MULTIMODAL={0,1}
 
 - BF16 paged KV → mixed BF16/INT8 KV，逐级验证 65K，再视余量争取 131K；不把 262016 作为默认交付目标。
 - continuous batching 先 C4 后 C8，完成公平性、尾延迟和 goodput gate。
-- Qwen3.5 vision 适配，public 4/4 后才申请 hidden 验证；12/12 后开启 capability。
+- Qwen3.8 vision 适配，public 4/4 后才申请 hidden 验证；12/12 后开启 capability。
 - 门禁：已声明最高 context 6/6 + 128 tokens + recovery；C4/C8 各 32/32；multimodal public 4/4、hidden 8/8。任何未通过项不阻塞 eligible base。
 
 #### 阶段 M5：证据和冻结
@@ -437,7 +448,7 @@ APXINF_Q35_MULTIMODAL={0,1}
 
 #### 阶段 S5：vision 与总集成
 
-- 接入 Qwen3.5 vision，完成 public/hidden 12/12；验证启用 vision 后基础 text cell 不因显存或 fragment 失效。
+- 接入 Qwen3.8 vision，完成 public/hidden 12/12；验证启用 vision 后基础 text cell 不因显存或 fragment 失效。
 - 全量 burn-in、clean checkout、正式 5-repeat campaign 和报告冻结。
 - 门禁：文本 eligibility、已启用基础 cell、99% success、无 OOM/NaN/fallback/Xid、所有已测 cell CV≤10%、PR review 证据齐全；context/C4/C8/vision 各自独立标记，不把未启用 bonus 作为该 lane 的硬门。
 
@@ -549,7 +560,7 @@ MTP 优化的是 TPOT 和 C4/C8 goodput，不保证必然提速。必须记录 a
 
 #### 阶段 C5：多模态和合规审计
 
-- 接入真实 Qwen3.5 vision；验证 media hash、processor identity、embedding cache 和不同 prompt 复用。
+- 接入真实 Qwen3.8 vision；验证 media hash、processor identity、embedding cache 和不同 prompt 复用。
 - 完成 public 4/4、hidden 8/8；生成 cache-off 对照和 fail-closed 证据。
 - 门禁：文本 eligibility 与已启用 bonus 各自通过；所有 cache/MTP 日志证明未缓存答案、target exact verify 无旁路；PR review 证据齐全。未启用的 bonus 记录为 0/unsupported，不阻塞文本冻结。
 
@@ -639,7 +650,7 @@ REPORT 和机器日志必须展示：
 | R4 基础冲榜 | 方案核心优化 | paired A/B、端到端加权收益、correctness 不降 |
 | R5 context | 逐级长上下文 | 最高长度 6/6、128 output、失败恢复 |
 | R6 multi | C4/C8 | 32/32、correctness 100%、Jain/p95/health 全过 |
-| R7 multimodal | Qwen3.5 image path | public 4/4、hidden 8/8、无 fallback、健康 |
+| R7 multimodal | Qwen3.8 image path | public 4/4、hidden 8/8、无 fallback、健康 |
 | R8 提交冻结 | REPORT、raw artifacts、clean replay | eligibility、已启用能力和 PR review 证据分别可重放；未启用 bonus 明确标记 0/unsupported |
 
 ### 9.2 基础分锁定顺序
