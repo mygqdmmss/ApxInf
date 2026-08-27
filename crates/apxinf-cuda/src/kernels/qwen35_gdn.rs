@@ -289,6 +289,76 @@ impl Qwen35GdnState {
         self.layout
     }
 
+    /// Overwrite this state's buffers with `source`'s contents
+    /// (stream-ordered copies; caller synchronizes once per session). The
+    /// recycled-session fast path for the prefix cache: reusing a retired
+    /// state's allocations avoids ~6 cudaMallocs per layer per fork.
+    pub fn copy_state_from(&mut self, source: &Self, ctx: &CudaContext) -> Result<()> {
+        if self.layout != source.layout || self.device_id != source.device_id {
+            return Err(Error::Other(
+                "GDN state refill requires an identical layout and device".into(),
+            ));
+        }
+        let stream = ctx.stream();
+        self.conv_current
+            .copy_from_device_async(&source.conv_current, stream)
+            .map_err(Error::Cuda)?;
+        self.conv_scratch
+            .copy_from_device_async(&source.conv_scratch, stream)
+            .map_err(Error::Cuda)?;
+        self.conv_backup
+            .copy_from_device_async(&source.conv_backup, stream)
+            .map_err(Error::Cuda)?;
+        self.recurrent_current
+            .copy_from_device_async(&source.recurrent_current, stream)
+            .map_err(Error::Cuda)?;
+        self.recurrent_scratch
+            .copy_from_device_async(&source.recurrent_scratch, stream)
+            .map_err(Error::Cuda)?;
+        self.recurrent_backup
+            .copy_from_device_async(&source.recurrent_backup, stream)
+            .map_err(Error::Cuda)?;
+        self.conv_cursor = source.conv_cursor;
+        self.position = source.position;
+        // "Pending rollback" means "the last commit is still revocable" —
+        // the normal post-step state, not an error. The backup buffers were
+        // copied above, so the clone can honour the same rollback.
+        self.conv_commit_pending_rollback = source.conv_commit_pending_rollback;
+        self.recurrent_commit_pending_rollback = source.recurrent_commit_pending_rollback;
+        self.recurrent_commit_tokens = source.recurrent_commit_tokens;
+        self.conv_commit_tokens = source.conv_commit_tokens;
+        Ok(())
+    }
+
+    /// Deep-clone this state (stream-ordered device-to-device copies of
+    /// every buffer plus the host-side cursors). Used by the prefix cache to
+    /// fork a session whose prompt state matches a completed prefill; the
+    /// clone is bit-identical, so a forked request decodes exactly like the
+    /// original. The copies are asynchronous on the context stream — the
+    /// caller synchronizes once after cloning the whole session.
+    pub fn deep_clone(&self, ctx: &CudaContext) -> Result<Self> {
+        let stream = ctx.stream();
+        let clone = |buffer: &CudaBuffer| buffer.try_clone_async(stream).map_err(Error::Cuda);
+        Ok(Self {
+            layout: self.layout,
+            device_id: self.device_id,
+            conv_current: clone(&self.conv_current)?,
+            conv_scratch: clone(&self.conv_scratch)?,
+            conv_backup: clone(&self.conv_backup)?,
+            recurrent_current: clone(&self.recurrent_current)?,
+            recurrent_scratch: clone(&self.recurrent_scratch)?,
+            recurrent_backup: clone(&self.recurrent_backup)?,
+            conv_cursor: self.conv_cursor,
+            position: self.position,
+            // The clone can honour the same last-commit rollback as the
+            // original: its backup buffers are copies of the same snapshot.
+            conv_commit_pending_rollback: self.conv_commit_pending_rollback,
+            recurrent_commit_pending_rollback: self.recurrent_commit_pending_rollback,
+            recurrent_commit_tokens: self.recurrent_commit_tokens,
+            conv_commit_tokens: self.conv_commit_tokens,
+        })
+    }
+
     pub const fn device_id(&self) -> usize {
         self.device_id
     }
@@ -1120,6 +1190,222 @@ fn require_vector(ctx: &CudaContext, tensor: &Tensor, length: usize, name: &str)
         )));
     }
     Ok(())
+}
+
+/// Upload a small host array of device pointers/cursors for a batched
+/// launch. Synchronous H2D by design: the copy also orders the host write
+/// before the kernel that consumes it.
+fn upload_control<T: Copy>(ctx: &CudaContext, values: &[T]) -> Result<CudaBuffer> {
+    let bytes = std::mem::size_of_val(values);
+    let buffer = CudaBuffer::alloc(bytes, ctx.device_id()).map_err(Error::Cuda)?;
+    let raw = unsafe { std::slice::from_raw_parts(values.as_ptr() as *const u8, bytes) };
+    buffer.copy_from_host(raw).map_err(Error::Cuda)?;
+    Ok(buffer)
+}
+
+/// Batched single-token causal convolution across independent request
+/// states: one `blockIdx.y` per request, each with its own ring buffers.
+/// Per-request math is bit-identical to `causal_conv_silu` (same kernel
+/// body), and each state's swap/backup/cursor commit matches the serial
+/// method.
+pub fn causal_conv_silu_batch(
+    ctx: &CudaContext,
+    states: &mut [&mut Qwen35GdnState],
+    input: &Tensor,
+    weights: &Tensor,
+) -> Result<Tensor> {
+    let batch = states.len();
+    if batch == 0 {
+        return Err(Error::Other("batched GDN convolution needs states".into()));
+    }
+    let layout = states[0].layout;
+    for state in states.iter() {
+        state.check_context(ctx)?;
+        if state.layout != layout {
+            return Err(Error::Other("batched GDN convolution layout mismatch".into()));
+        }
+    }
+    require_matrix(
+        ctx,
+        input,
+        batch,
+        layout.conv_channels(),
+        "batched GDN convolution input",
+    )?;
+    if weights.device() != Device::Cuda(ctx.device_id())
+        || weights.dtype() != DType::BF16
+        || weights.shape().dims() != [layout.conv_channels(), 1, layout.conv_kernel]
+    {
+        return Err(Error::Other(
+            "batched GDN convolution weights have the wrong shape".into(),
+        ));
+    }
+    let input_buffer = CudaBuffer::from_tensor(input).map_err(Error::Cuda)?;
+    let weight_buffer = CudaBuffer::from_tensor(weights).map_err(Error::Cuda)?;
+
+    let ring_in: Vec<u64> = states
+        .iter()
+        .map(|state| state.conv_current.ptr() as u64)
+        .collect();
+    let ring_out: Vec<u64> = states
+        .iter()
+        .map(|state| state.conv_scratch.ptr() as u64)
+        .collect();
+    let cursors: Vec<i32> = states
+        .iter()
+        .map(|state| state.conv_cursor as i32)
+        .collect();
+    let ring_in_buf = upload_control(ctx, &ring_in)?;
+    let ring_out_buf = upload_control(ctx, &ring_out)?;
+    let cursor_buf = upload_control(ctx, &cursors)?;
+
+    let output = alloc_zeroed(
+        checked_bytes(
+            batch
+                .checked_mul(layout.conv_channels())
+                .ok_or_else(|| Error::Other("batched GDN conv output overflow".into()))?,
+            DType::BF16,
+        )?,
+        ctx.device_id(),
+    )?;
+    let flags = StatusFlags::acquire(ctx)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_qwen35_gdn_conv_batch_bf16(
+            ring_in_buf.ptr(),
+            ring_out_buf.ptr(),
+            input_buffer.ptr(),
+            weight_buffer.ptr(),
+            output.ptr(),
+            cursor_buf.ptr(),
+            flags.ptr(),
+            checked_i32(batch, "GDN batch")?,
+            checked_i32(layout.conv_channels(), "GDN channels")?,
+            checked_i32(layout.conv_kernel, "GDN kernel")?,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    flags.finish(ctx, "batched GDN convolution")?;
+    let stream = ctx.stream();
+    for state in states.iter_mut() {
+        std::mem::swap(&mut state.conv_current, &mut state.conv_scratch);
+        state
+            .conv_backup
+            .copy_from_device_async(&state.conv_scratch, stream)
+            .map_err(Error::Cuda)?;
+        state.conv_cursor = (state.conv_cursor + 1) % state.layout.conv_kernel;
+        state.position = state
+            .position
+            .checked_add(1)
+            .ok_or_else(|| Error::Other("GDN position overflow".into()))?;
+        state.conv_commit_pending_rollback = true;
+        state.conv_commit_tokens = 1;
+    }
+    Ok(output.into_tensor(
+        Shape::new(vec![batch, layout.conv_channels()]),
+        DType::BF16,
+    ))
+}
+
+/// Batched single-token gated-delta update across independent request
+/// states. Per-request math is bit-identical to `gated_delta_step`.
+#[allow(clippy::too_many_arguments)]
+pub fn gated_delta_step_batch(
+    ctx: &CudaContext,
+    states: &mut [&mut Qwen35GdnState],
+    query: &Tensor,
+    key: &Tensor,
+    value: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+) -> Result<Tensor> {
+    let batch = states.len();
+    if batch == 0 {
+        return Err(Error::Other("batched GDN recurrence needs states".into()));
+    }
+    let layout = states[0].layout;
+    for state in states.iter() {
+        state.check_context(ctx)?;
+        if state.layout != layout {
+            return Err(Error::Other("batched GDN recurrence layout mismatch".into()));
+        }
+    }
+    require_matrix(ctx, query, batch, layout.query_width(), "batched GDN query")?;
+    require_matrix(ctx, key, batch, layout.query_width(), "batched GDN key")?;
+    require_matrix(ctx, value, batch, layout.value_width(), "batched GDN value")?;
+    require_matrix(ctx, a, batch, layout.value_heads, "batched GDN a")?;
+    require_matrix(ctx, b, batch, layout.value_heads, "batched GDN b")?;
+    require_vector(ctx, a_log, layout.value_heads, "GDN A_log")?;
+    require_vector(ctx, dt_bias, layout.value_heads, "GDN dt_bias")?;
+
+    let query = CudaBuffer::from_tensor(query).map_err(Error::Cuda)?;
+    let key = CudaBuffer::from_tensor(key).map_err(Error::Cuda)?;
+    let value = CudaBuffer::from_tensor(value).map_err(Error::Cuda)?;
+    let a = CudaBuffer::from_tensor(a).map_err(Error::Cuda)?;
+    let b = CudaBuffer::from_tensor(b).map_err(Error::Cuda)?;
+    let a_log = CudaBuffer::from_tensor(a_log).map_err(Error::Cuda)?;
+    let dt_bias = CudaBuffer::from_tensor(dt_bias).map_err(Error::Cuda)?;
+
+    let state_in: Vec<u64> = states
+        .iter()
+        .map(|state| state.recurrent_current.ptr() as u64)
+        .collect();
+    let state_out: Vec<u64> = states
+        .iter()
+        .map(|state| state.recurrent_scratch.ptr() as u64)
+        .collect();
+    let state_in_buf = upload_control(ctx, &state_in)?;
+    let state_out_buf = upload_control(ctx, &state_out)?;
+
+    let output = alloc_zeroed(
+        checked_bytes(
+            batch
+                .checked_mul(layout.value_width())
+                .ok_or_else(|| Error::Other("batched GDN output overflow".into()))?,
+            DType::BF16,
+        )?,
+        ctx.device_id(),
+    )?;
+    let flags = StatusFlags::acquire(ctx)?;
+    unsafe {
+        ffi::check_cuda(ffi::apxinf_qwen35_gdn_recurrent_batch_bf16_f32(
+            state_in_buf.ptr(),
+            state_out_buf.ptr(),
+            query.ptr(),
+            key.ptr(),
+            value.ptr(),
+            a.ptr(),
+            b.ptr(),
+            a_log.ptr(),
+            dt_bias.ptr(),
+            output.ptr(),
+            flags.ptr(),
+            checked_i32(batch, "GDN batch")?,
+            checked_i32(layout.key_heads, "GDN key heads")?,
+            checked_i32(layout.value_heads, "GDN value heads")?,
+            checked_i32(layout.key_dim, "GDN key dimension")?,
+            checked_i32(layout.value_dim, "GDN value dimension")?,
+            ctx.stream().handle(),
+        ))
+        .map_err(Error::Cuda)?;
+    }
+    flags.finish(ctx, "batched GDN recurrent update")?;
+    let stream = ctx.stream();
+    for state in states.iter_mut() {
+        std::mem::swap(&mut state.recurrent_current, &mut state.recurrent_scratch);
+        state
+            .recurrent_backup
+            .copy_from_device_async(&state.recurrent_scratch, stream)
+            .map_err(Error::Cuda)?;
+        state.recurrent_commit_pending_rollback = true;
+        state.recurrent_commit_tokens = 1;
+    }
+    Ok(output.into_tensor(
+        Shape::new(vec![batch, layout.value_width()]),
+        DType::BF16,
+    ))
 }
 
 fn checked_bytes(elements: usize, dtype: DType) -> Result<usize> {

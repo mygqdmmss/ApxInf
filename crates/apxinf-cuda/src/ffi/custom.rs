@@ -25,6 +25,40 @@ extern "C" {
         stream: cudaStream_t,
     ) -> cudaError_t;
 
+    pub fn apxinf_qwen35_gdn_conv_batch_bf16(
+        ring_in_ptrs: *const c_void,
+        ring_out_ptrs: *const c_void,
+        input: *const c_void,
+        weights: *const c_void,
+        output: *mut c_void,
+        cursors: *const c_void,
+        error_flags: *mut c_void,
+        batch: i32,
+        channels: i32,
+        kernel: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_qwen35_gdn_recurrent_batch_bf16_f32(
+        state_in_ptrs: *const c_void,
+        state_out_ptrs: *const c_void,
+        query: *const c_void,
+        key: *const c_void,
+        value: *const c_void,
+        a: *const c_void,
+        b: *const c_void,
+        a_log: *const c_void,
+        dt_bias: *const c_void,
+        output: *mut c_void,
+        error_flags: *mut c_void,
+        batch: i32,
+        key_heads: i32,
+        value_heads: i32,
+        key_dim: i32,
+        value_dim: i32,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
     pub fn apxinf_qwen35_gdn_conv_prefill_bf16(
         ring_in: *const c_void,
         ring_out: *mut c_void,
@@ -1068,6 +1102,18 @@ extern "C" {
         seq_len: u32,
         theta: f32,
         pos_ids: *const c_void,
+        stream: cudaStream_t,
+    ) -> cudaError_t;
+
+    pub fn apxinf_rope_partial_positions_bf16(
+        input: *const c_void,
+        output: *mut c_void,
+        head_dim: u32,
+        rotary_dim: u32,
+        n_heads: u32,
+        seq_len: u32,
+        rope_theta: f32,
+        positions: *const c_void,
         stream: cudaStream_t,
     ) -> cudaError_t;
 

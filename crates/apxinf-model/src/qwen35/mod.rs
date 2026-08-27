@@ -38,9 +38,9 @@ pub use model::{
     greedy_argmax, ExecutorError, GenerationOutput, Qwen35ReferenceExecutor, Qwen35RequestState,
     StopReason,
 };
-pub use runtime::{multimodal_enabled, request_state_bytes};
 #[cfg(feature = "cuda")]
-pub use runtime::{Qwen35CudaModel, Qwen35CudaSession};
+pub use runtime::{decode_step_batch, Qwen35CudaModel, Qwen35CudaSession};
+pub use runtime::{multimodal_enabled, request_resident_bytes, request_state_bytes};
 #[cfg(feature = "cuda")]
 pub use vision::{Qwen35VisionTower, VisionProbe};
 pub use weights::{PackedLinearLayout, WeightLayoutError};

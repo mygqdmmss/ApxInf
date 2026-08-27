@@ -99,6 +99,74 @@ impl CudaKVCache {
         })
     }
 
+    /// Overwrite this cache's pages with `source`'s contents (stream-ordered
+    /// copies; caller synchronizes once per session). Requires identical
+    /// geometry; the recycled-session fast path that avoids reallocating
+    /// every layer's K/V pages on a prefix-cache fork.
+    pub fn copy_from(&mut self, source: &Self, ctx: &crate::CudaContext) -> Result<(), Error> {
+        if self.k_buffers.len() != source.k_buffers.len()
+            || self.n_kv_heads != source.n_kv_heads
+            || self.head_dim != source.head_dim
+            || self.max_seq_len != source.max_seq_len
+            || self.device_id != source.device_id
+        {
+            return Err(Error::Other(
+                "KV cache refill requires identical geometry".into(),
+            ));
+        }
+        let stream = ctx.stream();
+        for (destination, origin) in self.k_buffers.iter().zip(&source.k_buffers) {
+            destination
+                .copy_from_device_async(origin, stream)
+                .map_err(Error::Cuda)?;
+        }
+        for (destination, origin) in self.v_buffers.iter().zip(&source.v_buffers) {
+            destination
+                .copy_from_device_async(origin, stream)
+                .map_err(Error::Cuda)?;
+        }
+        self.seq_len = source.seq_len;
+        let source_dtype = *source
+            .dtype
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .dtype
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = source_dtype;
+        Ok(())
+    }
+
+    /// Deep-clone this cache (stream-ordered device-to-device copies of
+    /// every layer's K and V pages plus the logical length). Used by the
+    /// prefix cache to fork a prompt's KV state; the pages are bit-identical.
+    /// Asynchronous on the context stream — the caller synchronizes once
+    /// after cloning the whole session.
+    pub fn deep_clone(&self, ctx: &crate::CudaContext) -> Result<Self, Error> {
+        let stream = ctx.stream();
+        let clone_buffers = |buffers: &Vec<CudaBuffer>| -> Result<Vec<CudaBuffer>, Error> {
+            buffers
+                .iter()
+                .map(|buffer| buffer.try_clone_async(stream).map_err(Error::Cuda))
+                .collect()
+        };
+        let dtype_value = *self
+            .dtype
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Ok(Self {
+            k_buffers: clone_buffers(&self.k_buffers)?,
+            v_buffers: clone_buffers(&self.v_buffers)?,
+            n_kv_heads: self.n_kv_heads,
+            head_dim: self.head_dim,
+            max_seq_len: self.max_seq_len,
+            seq_len: self.seq_len,
+            device_id: self.device_id,
+            dtype: Mutex::new(dtype_value),
+            fixed_dtype: self.fixed_dtype,
+        })
+    }
+
     /// Append K/V data for multiple positions using the GPU append kernel.
     pub fn append(
         &self,

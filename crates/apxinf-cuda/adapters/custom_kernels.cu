@@ -285,6 +285,59 @@ extern "C" cudaError_t apxinf_qwen35_gdn_conv_prefill_bf16(
   return cudaGetLastError();
 }
 
+extern "C" cudaError_t apxinf_qwen35_gdn_conv_batch_bf16(
+    const void* ring_in_ptrs, const void* ring_out_ptrs, const void* input,
+    const void* weights, void* output, const void* cursors, void* error_flags,
+    int batch, int channels, int kernel, cudaStream_t stream) {
+  if (ring_in_ptrs == nullptr || ring_out_ptrs == nullptr ||
+      input == nullptr || weights == nullptr || output == nullptr ||
+      cursors == nullptr || error_flags == nullptr || batch <= 0 ||
+      channels <= 0 || kernel <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  dim3 grid((channels + 255) / 256, batch, 1);
+  qwen35_gdn_conv_batch_bf16_kernel<<<grid, 256, 0, stream>>>(
+      static_cast<const unsigned long long*>(ring_in_ptrs),
+      static_cast<const unsigned long long*>(ring_out_ptrs),
+      static_cast<const __nv_bfloat16*>(input),
+      static_cast<const __nv_bfloat16*>(weights),
+      static_cast<__nv_bfloat16*>(output),
+      static_cast<const int*>(cursors),
+      static_cast<uint32_t*>(error_flags), channels, kernel);
+  return cudaGetLastError();
+}
+
+extern "C" cudaError_t apxinf_qwen35_gdn_recurrent_batch_bf16_f32(
+    const void* state_in_ptrs, const void* state_out_ptrs, const void* query,
+    const void* key, const void* value, const void* a, const void* b,
+    const void* a_log, const void* dt_bias, void* output, void* error_flags,
+    int batch, int key_heads, int value_heads, int key_dim, int value_dim,
+    cudaStream_t stream) {
+  if (state_in_ptrs == nullptr || state_out_ptrs == nullptr ||
+      query == nullptr || key == nullptr || value == nullptr ||
+      a == nullptr || b == nullptr || a_log == nullptr ||
+      dt_bias == nullptr || output == nullptr || error_flags == nullptr ||
+      batch <= 0 || key_heads <= 0 || value_heads <= 0 ||
+      value_heads % key_heads != 0 || key_dim <= 0 || value_dim <= 0) {
+    return cudaErrorInvalidValue;
+  }
+  dim3 grid(value_heads, batch, 1);
+  qwen35_gdn_recurrent_batch_bf16_f32_kernel<<<grid, 256, 0, stream>>>(
+      static_cast<const unsigned long long*>(state_in_ptrs),
+      static_cast<const unsigned long long*>(state_out_ptrs),
+      static_cast<const __nv_bfloat16*>(query),
+      static_cast<const __nv_bfloat16*>(key),
+      static_cast<const __nv_bfloat16*>(value),
+      static_cast<const __nv_bfloat16*>(a),
+      static_cast<const __nv_bfloat16*>(b),
+      static_cast<const __nv_bfloat16*>(a_log),
+      static_cast<const __nv_bfloat16*>(dt_bias),
+      static_cast<__nv_bfloat16*>(output),
+      static_cast<uint32_t*>(error_flags), key_heads, value_heads, key_dim,
+      value_dim);
+  return cudaGetLastError();
+}
+
 extern "C" cudaError_t apxinf_qwen35_gdn_recurrent_bf16_f32(
     const void* state_in, void* state_out, const void* query, const void* key,
     const void* value, const void* a, const void* b, const void* a_log,

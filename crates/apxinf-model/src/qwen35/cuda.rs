@@ -62,6 +62,29 @@ impl Qwen35CudaGdnState {
             .reset(backend.context())
             .map_err(|error| error.to_string())
     }
+
+    /// Refill this state in place from `source` (recycled-session fast path).
+    pub fn copy_state_from(
+        &mut self,
+        source: &Self,
+        backend: &apxinf_cuda::CudaBackend,
+    ) -> Result<(), String> {
+        self.state
+            .copy_state_from(&source.state, backend.context())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Deep-clone the per-request GDN state (bit-identical device copies,
+    /// stream-ordered; the session-level fork synchronizes once at the end).
+    pub fn deep_clone(&self, backend: &apxinf_cuda::CudaBackend) -> Result<Self, String> {
+        Ok(Self {
+            state: self
+                .state
+                .deep_clone(backend.context())
+                .map_err(|error| error.to_string())?,
+            device_id: self.device_id,
+        })
+    }
 }
 
 /// Device-owned weights and execution for one real Qwen3.5 GDN layer.
@@ -562,6 +585,200 @@ impl Qwen35CudaGdnLayer {
             }
         }
     }
+
+    /// Batched decode: advance `states.len()` independent requests by one
+    /// token each. RMSNorm, the qkv/z/a/b projections and the MLP run as one
+    /// `[M, ...]` batch (per-row bit-identical kernels); the convolution,
+    /// gated-delta recurrence and gated norm run per request on row slices.
+    /// Outputs are bit-identical to M sequential `decode_token` calls.
+    ///
+    /// Error semantics: a failure poisons the whole batch (earlier rows may
+    /// have committed conv/recurrent state); callers must drop every session
+    /// in the batch. No per-row rollback is attempted.
+    pub fn decode_token_batch(
+        &self,
+        backend: &apxinf_cuda::CudaBackend,
+        hidden: &Tensor,
+        states: &mut [&mut Qwen35CudaGdnState],
+    ) -> Result<Tensor, String> {
+        let batch = states.len();
+        let expected_device = Device::Cuda(self.device_id);
+        if batch == 0
+            || backend.device() != expected_device
+            || hidden.device() != expected_device
+            || hidden.dtype() != DType::BF16
+            || hidden.shape().dims() != [batch, self.hidden_size]
+        {
+            return Err(format!(
+                "GDN batched decode requires CUDA{} BF16 [{batch},{}] hidden",
+                self.device_id, self.hidden_size
+            ));
+        }
+        for (index, state) in states.iter().enumerate() {
+            if state.device_id != self.device_id || state.state.layout() != self.dimensions {
+                return Err(format!("GDN batched decode state {index} mismatch"));
+            }
+        }
+
+        let ctx = backend.context();
+        let normalized = backend
+            .rms_norm(hidden, &self.input_norm, self.rms_epsilon)
+            .map_err(|error| error.to_string())?;
+        // The packed-W4 projections assign one CUDA block per (row, out)
+        // pair, so a batched call is bit-identical per row and safe to share.
+        // The BF16 in_proj_a/in_proj_b run through cuBLAS, whose kernel
+        // choice (and per-row accumulation order) changes with M — those run
+        // per request on the normalized row to stay bit-identical.
+        let qkv_all = self
+            .in_proj_qkv
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+        let z_all = self
+            .in_proj_z
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+
+        let key_width = self.dimensions.key_heads * self.dimensions.key_dim;
+        let value_width = self.dimensions.value_width();
+        // a/b run through cuBLAS; keep them per request (bit-identical to
+        // the serial path) and stack the [1, heads] rows for the batched
+        // recurrence kernel.
+        let mut a_rows: Vec<Tensor> = Vec::with_capacity(batch);
+        let mut b_rows: Vec<Tensor> = Vec::with_capacity(batch);
+        for index in 0..batch {
+            let normalized_row = matrix_row(ctx, &normalized, index)?;
+            a_rows.push(
+                self.in_proj_a
+                    .project(ctx, &normalized_row)
+                    .map_err(|error| error.to_string())?,
+            );
+            b_rows.push(
+                self.in_proj_b
+                    .project(ctx, &normalized_row)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        let a_refs: Vec<&Tensor> = a_rows.iter().collect();
+        let b_refs: Vec<&Tensor> = b_rows.iter().collect();
+        let a_all = apxinf_cuda::kernels::elementwise::stack_rows_bf16(ctx, &a_refs)
+            .map_err(|error| error.to_string())?;
+        let b_all = apxinf_cuda::kernels::elementwise::stack_rows_bf16(ctx, &b_refs)
+            .map_err(|error| error.to_string())?;
+
+        // Batched convolution/recurrence/gated-norm: one kernel per stage for
+        // the whole batch, with per-request ring/state pointer arrays. The
+        // per-request math inside each kernel is copied verbatim from the
+        // serial kernels, so outputs and state updates stay bit-identical.
+        let mut gdn_states: Vec<&mut apxinf_cuda::kernels::qwen35_gdn::Qwen35GdnState> =
+            states.iter_mut().map(|state| &mut state.state).collect();
+        let convolved = apxinf_cuda::kernels::qwen35_gdn::causal_conv_silu_batch(
+            ctx,
+            &mut gdn_states,
+            &qkv_all,
+            &self.conv_weight,
+        )
+        .map_err(|error| error.to_string())?;
+        let query =
+            apxinf_cuda::kernels::elementwise::slice_columns_bf16(ctx, &convolved, 0, key_width)
+                .map_err(|error| error.to_string())?;
+        let key = apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+            ctx, &convolved, key_width, key_width,
+        )
+        .map_err(|error| error.to_string())?;
+        let value = apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+            ctx,
+            &convolved,
+            key_width * 2,
+            value_width,
+        )
+        .map_err(|error| error.to_string())?;
+        let recurrent = apxinf_cuda::kernels::qwen35_gdn::gated_delta_step_batch(
+            ctx,
+            &mut gdn_states,
+            &query,
+            &key,
+            &value,
+            &a_all,
+            &b_all,
+            &self.a_log,
+            &self.dt_bias,
+        )
+        .map_err(|error| error.to_string())?;
+        let gated = gated_rms_norm_bf16(
+            ctx,
+            &recurrent,
+            &z_all,
+            &self.norm,
+            self.dimensions.value_heads,
+            self.dimensions.value_dim,
+            self.rms_epsilon,
+        )
+        .map_err(|error| error.to_string())?;
+        // out_proj may be a BF16 (cuBLAS) matrix on this checkpoint; keep it
+        // per-row for bit equality in that case, batch when packed W4.
+        let attention_update = match &self.out_proj {
+            Qwen35MixedProjection::Packed(projection) => projection
+                .project(ctx, &gated)
+                .map_err(|error| error.to_string())?,
+            Qwen35MixedProjection::Bf16(projection) => {
+                let mut update_rows: Vec<Tensor> = Vec::with_capacity(batch);
+                for index in 0..batch {
+                    let gated_row = matrix_row(ctx, &gated, index)?;
+                    update_rows.push(
+                        projection
+                            .project(ctx, &gated_row)
+                            .map_err(|error| error.to_string())?,
+                    );
+                }
+                let update_refs: Vec<&Tensor> = update_rows.iter().collect();
+                apxinf_cuda::kernels::elementwise::stack_rows_bf16(ctx, &update_refs)
+                    .map_err(|error| error.to_string())?
+            }
+        };
+        let residual = backend
+            .add(hidden, &attention_update)
+            .map_err(|error| error.to_string())?;
+        let mlp_input = backend
+            .rms_norm(&residual, &self.post_attention_norm, self.rms_epsilon)
+            .map_err(|error| error.to_string())?;
+        let mlp_gate = self
+            .mlp_gate_proj
+            .project(ctx, &mlp_input)
+            .map_err(|error| error.to_string())?;
+        let mlp_up = self
+            .mlp_up_proj
+            .project(ctx, &mlp_input)
+            .map_err(|error| error.to_string())?;
+        let mlp_hidden = backend
+            .mul(
+                &backend.silu(&mlp_gate).map_err(|error| error.to_string())?,
+                &mlp_up,
+            )
+            .map_err(|error| error.to_string())?;
+        let mlp_update = self
+            .mlp_down_proj
+            .project(ctx, &mlp_hidden)
+            .map_err(|error| error.to_string())?;
+        let output = backend
+            .add(&residual, &mlp_update)
+            .map_err(|error| error.to_string())?;
+        apxinf_cuda::kernels::qwen35_gdn::require_finite_bf16(
+            ctx,
+            &output,
+            "GDN batched decode output",
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(output)
+    }
+}
+
+/// Zero-copy view of row `index` of a `[rows, width]` BF16 device matrix as
+/// `[1, width]`. Shares storage with the batch tensor, so the row is the
+/// batch entry itself (trivially bit-identical) and per-request consumers
+/// pay no copy or allocation.
+fn matrix_row(_ctx: &CudaContext, matrix: &Tensor, index: usize) -> Result<Tensor, String> {
+    apxinf_cuda::kernels::elementwise::row_view_bf16(matrix, index)
+        .map_err(|error| format!("matrix row view: {error}"))
 }
 
 fn upload_bf16_payload(
@@ -791,6 +1008,33 @@ impl Qwen35CudaFullAttentionState {
 
     pub fn clear(&mut self) -> Result<(), String> {
         apxinf_core::KvCache::clear(&mut self.cache).map_err(|error| error.to_string())
+    }
+
+    /// Refill this state in place from `source` (recycled-session fast path).
+    pub fn copy_state_from(
+        &mut self,
+        source: &Self,
+        backend: &apxinf_cuda::CudaBackend,
+    ) -> Result<(), String> {
+        if self.max_seq_len != source.max_seq_len {
+            return Err("KV state refill requires identical capacity".into());
+        }
+        self.cache
+            .copy_from(&source.cache, backend.context())
+            .map_err(|error| error.to_string())
+    }
+
+    /// Deep-clone the per-request KV state (bit-identical device copies,
+    /// stream-ordered; the session-level fork synchronizes once at the end).
+    pub fn deep_clone(&self, backend: &apxinf_cuda::CudaBackend) -> Result<Self, String> {
+        Ok(Self {
+            cache: self
+                .cache
+                .deep_clone(backend.context())
+                .map_err(|error| error.to_string())?,
+            max_seq_len: self.max_seq_len,
+            device_id: self.device_id,
+        })
     }
 }
 
@@ -1128,6 +1372,224 @@ impl Qwen35CudaFullAttentionLayer {
         )
         .map_err(|error| error.to_string())?;
         state.cache.advance(1);
+        Ok(output)
+    }
+
+    /// Batched decode: advance `states.len()` independent requests by one
+    /// token each. The shared weight-bound work (RMSNorm, all W4/BF16
+    /// projections, the MLP) runs as one `[M, ...]` batch whose per-row
+    /// kernels are bit-identical to the single-request path; the per-request
+    /// segment (head reshape, QK norm, RoPE at each request's own position,
+    /// KV append, flash decode, sigmoid gate) runs as an M-iteration loop on
+    /// row slices. Outputs are therefore bit-identical to M sequential
+    /// `decode_token` calls.
+    ///
+    /// Error semantics: any failure poisons the whole batch (KV appends may
+    /// have committed for earlier rows); callers must drop every session in
+    /// the batch, mirroring the single-request drop-on-failure rule.
+    pub fn decode_token_batch(
+        &self,
+        backend: &apxinf_cuda::CudaBackend,
+        hidden: &Tensor,
+        positions: &[usize],
+        states: &mut [&mut Qwen35CudaFullAttentionState],
+    ) -> Result<Tensor, String> {
+        let batch = states.len();
+        let hidden_size = self.input_norm.shape().dims()[0];
+        let expected_device = Device::Cuda(self.device_id);
+        if batch == 0
+            || positions.len() != batch
+            || backend.device() != expected_device
+            || hidden.device() != expected_device
+            || hidden.dtype() != DType::BF16
+            || hidden.shape().dims() != [batch, hidden_size]
+        {
+            return Err(format!(
+                "full-attention batched decode requires CUDA{} BF16 [{batch},{hidden_size}] hidden and one position per state",
+                self.device_id
+            ));
+        }
+        for (index, state) in states.iter().enumerate() {
+            if state.device_id != self.device_id {
+                return Err(format!(
+                    "batched decode state {index} is on the wrong device"
+                ));
+            }
+            if positions[index] != state.seq_len() {
+                return Err(format!(
+                    "batched decode position {} does not match state {index} KV length {}",
+                    positions[index],
+                    state.seq_len()
+                ));
+            }
+            if positions[index] >= state.max_seq_len || positions[index] > u32::MAX as usize {
+                return Err(format!(
+                    "batched decode position {} out of range for state {index}",
+                    positions[index]
+                ));
+            }
+        }
+
+        let ctx = backend.context();
+        let normalized = backend
+            .rms_norm(hidden, &self.input_norm, self.rms_epsilon)
+            .map_err(|error| error.to_string())?;
+        let q_gate_all = self
+            .q_proj
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+        let k_all = self
+            .k_proj
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+        let v_all = self
+            .v_proj
+            .project(ctx, &normalized)
+            .map_err(|error| error.to_string())?;
+
+        let q_width = self.n_query_heads * self.head_dim;
+        let k_width = self.n_kv_heads * self.head_dim;
+        // Shared, per-row-independent stages run once for the whole batch:
+        // the q/gate column split ([batch*heads, 2*dim] view is the same
+        // memory layout the serial path reshapes through), the QK RMSNorms
+        // (row-independent kernel), the per-row-position partial RoPE, and
+        // the sigmoid gate. Only KV append and flash decode stay per request.
+        let q_gate_heads = q_gate_all
+            .reshape(vec![batch * self.n_query_heads, self.head_dim * 2])
+            .map_err(|error| error.to_string())?;
+        let q_flat = apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+            ctx,
+            &q_gate_heads,
+            0,
+            self.head_dim,
+        )
+        .map_err(|error| error.to_string())?;
+        let gate_flat = apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+            ctx,
+            &q_gate_heads,
+            self.head_dim,
+            self.head_dim,
+        )
+        .map_err(|error| error.to_string())?;
+        let gate_all = gate_flat
+            .reshape(vec![batch, q_width])
+            .map_err(|error| error.to_string())?;
+        let q_all = backend
+            .rms_norm(&q_flat, &self.q_norm, self.rms_epsilon)
+            .map_err(|error| error.to_string())?
+            .reshape(vec![batch, self.n_query_heads, self.head_dim])
+            .map_err(|error| error.to_string())?;
+        let k_all = k_all
+            .reshape(vec![batch * self.n_kv_heads, self.head_dim])
+            .and_then(|value| backend.rms_norm(&value, &self.k_norm, self.rms_epsilon))
+            .map_err(|error| error.to_string())?
+            .reshape(vec![batch, self.n_kv_heads, self.head_dim])
+            .map_err(|error| error.to_string())?;
+        let rope_positions: Vec<u32> = positions.iter().map(|value| *value as u32).collect();
+        let q_all = apxinf_cuda::kernels::rope::apply_partial_positions(
+            ctx,
+            &q_all,
+            self.n_query_heads,
+            self.head_dim,
+            self.rotary_dim,
+            self.rope_theta,
+            &rope_positions,
+        )
+        .map_err(|error| error.to_string())?;
+        let k_all = apxinf_cuda::kernels::rope::apply_partial_positions(
+            ctx,
+            &k_all,
+            self.n_kv_heads,
+            self.head_dim,
+            self.rotary_dim,
+            self.rope_theta,
+            &rope_positions,
+        )
+        .map_err(|error| error.to_string())?;
+        let q_all = q_all
+            .reshape(vec![batch, q_width])
+            .map_err(|error| error.to_string())?;
+        let k_all = k_all
+            .reshape(vec![batch, k_width])
+            .map_err(|error| error.to_string())?;
+
+        let mut attended_rows: Vec<Tensor> = Vec::with_capacity(batch);
+        for (index, state) in states.iter_mut().enumerate() {
+            let position = positions[index];
+            let q = matrix_row(ctx, &q_all, index)?
+                .reshape(vec![1, self.n_query_heads, self.head_dim])
+                .map_err(|error| error.to_string())?;
+            let k = matrix_row(ctx, &k_all, index)?
+                .reshape(vec![1, self.n_kv_heads, self.head_dim])
+                .map_err(|error| error.to_string())?;
+            let v = matrix_row(ctx, &v_all, index)?
+                .reshape(vec![1, self.n_kv_heads, self.head_dim])
+                .map_err(|error| error.to_string())?;
+            state
+                .cache
+                .append(ctx, 0, &k, &v, 1)
+                .map_err(|error| error.to_string())?;
+            let attended = backend
+                .sdpa_decode(
+                    &q,
+                    &mut state.cache,
+                    0,
+                    self.n_query_heads,
+                    self.n_kv_heads,
+                    self.head_dim,
+                    position + 1,
+                    state.max_seq_len,
+                )
+                .map_err(|error| error.to_string())?;
+            attended_rows.push(attended);
+        }
+        let attended_refs: Vec<&Tensor> = attended_rows.iter().collect();
+        let attended = apxinf_cuda::kernels::elementwise::stack_rows_bf16(ctx, &attended_refs)
+            .map_err(|error| error.to_string())?;
+        let gate = apxinf_cuda::kernels::activation::sigmoid(ctx, &gate_all)
+            .map_err(|error| error.to_string())?;
+        let gated = backend
+            .mul(&attended, &gate)
+            .map_err(|error| error.to_string())?;
+
+        let attention_update = self
+            .o_proj
+            .project(ctx, &gated)
+            .map_err(|error| error.to_string())?;
+        let residual = backend
+            .add(hidden, &attention_update)
+            .map_err(|error| error.to_string())?;
+        let mlp_input = backend
+            .rms_norm(&residual, &self.post_attention_norm, self.rms_epsilon)
+            .map_err(|error| error.to_string())?;
+        let mlp_gate = self
+            .gate_proj
+            .project(ctx, &mlp_input)
+            .map_err(|error| error.to_string())?;
+        let mlp_up = self
+            .up_proj
+            .project(ctx, &mlp_input)
+            .map_err(|error| error.to_string())?;
+        let mlp_gate = backend.silu(&mlp_gate).map_err(|error| error.to_string())?;
+        let mlp_hidden = backend
+            .mul(&mlp_gate, &mlp_up)
+            .map_err(|error| error.to_string())?;
+        let mlp_update = self
+            .down_proj
+            .project(ctx, &mlp_hidden)
+            .map_err(|error| error.to_string())?;
+        let output = backend
+            .add(&residual, &mlp_update)
+            .map_err(|error| error.to_string())?;
+        apxinf_cuda::kernels::qwen35_gdn::require_finite_bf16(
+            ctx,
+            &output,
+            "full-attention batched decode output",
+        )
+        .map_err(|error| error.to_string())?;
+        for state in states.iter_mut() {
+            state.cache.advance(1);
+        }
         Ok(output)
     }
 
@@ -1473,6 +1935,135 @@ mod tests {
             mlp_gate_proj: zero_packed(3, 2),
             mlp_up_proj: zero_packed(3, 2),
             mlp_down_proj: zero_packed(2, 3),
+        }
+    }
+
+    /// Batched decode must be bit-identical to running the same requests
+    /// serially: the shared projections are per-row independent kernels and
+    /// the per-request segment reuses the serial code path, so any deviation
+    /// is an orchestration bug. Verified on the real checkpoint layers with
+    /// three requests over three steps, including divergent attention
+    /// positions.
+    #[test]
+    #[ignore = "requires GPU and the pinned Qwen3.5 checkpoint"]
+    fn real_layers_batched_decode_bit_matches_serial() {
+        let checkpoint = std::env::var_os("APXINF_QWEN35_CHECKPOINT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from("/mnt/chuangxin/team2/models/Qwen3.8-27B-AWQ-INT4")
+            });
+        let device = std::env::var("APXINF_CUDA_DEVICE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let ctx = CudaContext::new(device).expect("CUDA device required");
+        let backend = apxinf_cuda::CudaBackend::new(device).expect("CUDA backend required");
+        let inventory =
+            Qwen35CheckpointInventory::from_checkpoint_dir(&checkpoint, QWEN35_MODEL_REVISION)
+                .unwrap();
+        let gdn = Qwen35CudaGdnLayer::from_inventory(&ctx, &inventory, 0).unwrap();
+        let attention = Qwen35CudaFullAttentionLayer::from_inventory(&ctx, &inventory, 3).unwrap();
+
+        let batch = 3usize;
+        let steps = 3usize;
+        // Deterministic pseudo-random step inputs, distinct per (step, row).
+        let step_hidden = |step: usize| -> Vec<half::bf16> {
+            (0..batch * 5120)
+                .map(|index| {
+                    let raw = (index * 2654435761 + step * 40503) % 1013;
+                    half::bf16::from_f32(((raw as f32) - 506.0) * 0.0004)
+                })
+                .collect()
+        };
+        let upload_matrix = |values: &[half::bf16], rows: usize| -> Tensor {
+            let host = Tensor::from_bf16(Shape::new(vec![rows, 5120]), values).unwrap();
+            apxinf_cuda::transfers::to_cuda(&host, device).unwrap()
+        };
+        let bits = |tensor: &Tensor| -> Vec<u16> {
+            apxinf_cuda::transfers::to_cpu(tensor)
+                .unwrap()
+                .as_bf16()
+                .unwrap()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect()
+        };
+
+        // ── GDN layer ────────────────────────────────────────────────
+        let mut serial_states: Vec<Qwen35CudaGdnState> = (0..batch)
+            .map(|_| Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap())
+            .collect();
+        let mut batch_states: Vec<Qwen35CudaGdnState> = (0..batch)
+            .map(|_| Qwen35CudaGdnState::new(&backend, gdn.dimensions()).unwrap())
+            .collect();
+        for step in 0..steps {
+            let values = step_hidden(step);
+            let mut serial_outputs: Vec<u16> = Vec::new();
+            for (row, state) in serial_states.iter_mut().enumerate() {
+                let row_values = &values[row * 5120..(row + 1) * 5120];
+                let hidden = upload_matrix(row_values, 1);
+                let output = gdn.decode_token(&backend, &hidden, state).unwrap();
+                serial_outputs.extend(bits(&output));
+            }
+            let hidden = upload_matrix(&values, batch);
+            let mut refs: Vec<&mut Qwen35CudaGdnState> = batch_states.iter_mut().collect();
+            let output = gdn
+                .decode_token_batch(&backend, &hidden, &mut refs)
+                .unwrap();
+            assert_eq!(
+                bits(&output),
+                serial_outputs,
+                "GDN batched step {step} diverged from serial"
+            );
+        }
+
+        // ── Full-attention layer, including divergent positions ──────
+        let capacity = 16usize;
+        let mut serial_states: Vec<Qwen35CudaFullAttentionState> = (0..batch)
+            .map(|_| Qwen35CudaFullAttentionState::new(&backend, capacity).unwrap())
+            .collect();
+        let mut batch_states: Vec<Qwen35CudaFullAttentionState> = (0..batch)
+            .map(|_| Qwen35CudaFullAttentionState::new(&backend, capacity).unwrap())
+            .collect();
+        // Give request 2 a one-step head start on both sides so the batched
+        // call sees genuinely different positions.
+        {
+            let values = step_hidden(99);
+            let row_values = &values[2 * 5120..3 * 5120];
+            let hidden = upload_matrix(row_values, 1);
+            let serial_out = attention
+                .decode_token(&backend, &hidden, 0, &mut serial_states[2])
+                .unwrap();
+            let batch_out = attention
+                .decode_token(&backend, &hidden, 0, &mut batch_states[2])
+                .unwrap();
+            assert_eq!(bits(&serial_out), bits(&batch_out));
+        }
+        for step in 0..steps {
+            let values = step_hidden(step);
+            let mut serial_outputs: Vec<u16> = Vec::new();
+            for (row, state) in serial_states.iter_mut().enumerate() {
+                let row_values = &values[row * 5120..(row + 1) * 5120];
+                let hidden = upload_matrix(row_values, 1);
+                let position = state.seq_len();
+                let output = attention
+                    .decode_token(&backend, &hidden, position, state)
+                    .unwrap();
+                serial_outputs.extend(bits(&output));
+            }
+            let hidden = upload_matrix(&values, batch);
+            let positions: Vec<usize> = batch_states.iter().map(|state| state.seq_len()).collect();
+            assert_ne!(positions[0], positions[2], "positions must diverge");
+            let mut refs: Vec<&mut Qwen35CudaFullAttentionState> =
+                batch_states.iter_mut().collect();
+            let output = attention
+                .decode_token_batch(&backend, &hidden, &positions, &mut refs)
+                .unwrap();
+            assert_eq!(
+                bits(&output),
+                serial_outputs,
+                "attention batched step {step} diverged from serial"
+            );
         }
     }
 

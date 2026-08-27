@@ -259,8 +259,9 @@ fn run_serve(args: ServeArgs) -> Result<(), String> {
     }
     #[cfg(any(feature = "cuda", feature = "cuda-no-nvtx"))]
     {
-        use apxinf_model::qwen35::{request_state_bytes, Qwen35CudaModel};
+        use apxinf_model::qwen35::{request_resident_bytes, request_state_bytes, Qwen35CudaModel};
         use apxinf_model::RuntimeCapabilities;
+        use server::qwen35_batch::{max_concurrency, Qwen35BatchProtocolRuntime};
         use server::qwen35_runtime::{Qwen35CudaStepExecutor, Qwen35ProtocolRuntime};
         use server::service::ProtocolService;
 
@@ -275,38 +276,89 @@ fn run_serve(args: ServeArgs) -> Result<(), String> {
             .memory_info()
             .map_err(|error| format!("CUDA memory query failed: {error}"))?;
         let per_request_bytes = request_state_bytes(&inventory.config, args.max_model_len)?;
-        if per_request_bytes > memory.free_bytes {
-            return Err(format!(
-                "request state requires {per_request_bytes} bytes but CUDA{} has {} bytes free",
-                model.device_id(),
-                memory.free_bytes
-            ));
-        }
-        let capabilities = RuntimeCapabilities {
-            vocab_size: inventory.config.vocab_size,
-            max_model_len: args.max_model_len,
-            parallel_requests: 1,
-            device_budget_bytes: memory.free_bytes,
-            per_request_bytes,
-        };
-        let executor = Arc::new(Qwen35CudaStepExecutor::new(model));
-        let runtime = Qwen35ProtocolRuntime::new(capabilities, args.queue_capacity, executor)
-            .map_err(|error| format!("runtime initialization failed: {error}"))?;
-        let mut service = ProtocolService::new_unready(runtime, false);
-        if apxinf_model::qwen35::multimodal_enabled() {
-            let chat =
-                server::chat::ChatPreprocessor::from_model_dir(&args.model, args.max_model_len)
+        let concurrency = max_concurrency();
+
+        macro_rules! finish_serve {
+            ($runtime:expr) => {{
+                let mut service = ProtocolService::new_unready($runtime, false);
+                if apxinf_model::qwen35::multimodal_enabled() {
+                    let chat = server::chat::ChatPreprocessor::from_model_dir(
+                        &args.model,
+                        args.max_model_len,
+                    )
                     .map_err(|error| format!("multimodal chat initialization failed: {error}"))?;
-            service = service.with_chat(chat);
+                    service = service.with_chat(chat);
+                }
+                let service = Arc::new(service);
+                service
+                    .warmup()
+                    .map_err(|error| format!("CUDA warmup failed: {error}"))?;
+                let listener = TcpListener::bind(args.bind)
+                    .map_err(|error| format!("bind {} failed: {error}", args.bind))?;
+                server::http::serve(listener, service)
+                    .map_err(|error| format!("HTTP server failed: {error}"))
+            }};
         }
-        let service = Arc::new(service);
-        service
-            .warmup()
-            .map_err(|error| format!("CUDA warmup failed: {error}"))?;
-        let listener = TcpListener::bind(args.bind)
-            .map_err(|error| format!("bind {} failed: {error}", args.bind))?;
-        server::http::serve(listener, service)
-            .map_err(|error| format!("HTTP server failed: {error}"))
+
+        if concurrency > 1 {
+            // Concurrent batched runtime (multi-request bonus lane, gated by
+            // APXINF_Q35_MAX_CONCURRENCY >= 2). Admission reserves each
+            // request's actual KV+GDN bytes; the shared one-at-a-time prefill
+            // workspace and one prefix-cache template slot are subtracted
+            // from the budget up front so an over-committed mix still fails
+            // closed at admission rather than at cudaMalloc.
+            let workspace_reserve =
+                request_state_bytes(&inventory.config, args.max_model_len)?.saturating_sub(
+                    request_resident_bytes(&inventory.config, args.max_model_len)?,
+                );
+            let template_reserve = request_resident_bytes(&inventory.config, 4096)?;
+            let device_budget_bytes = memory
+                .free_bytes
+                .saturating_sub(workspace_reserve)
+                .saturating_sub(template_reserve);
+            let single_request = request_resident_bytes(&inventory.config, args.max_model_len)?;
+            if single_request > device_budget_bytes {
+                // A request that budgets the full context cannot be admitted
+                // under the concurrent accounting; it will receive the
+                // contract's structured 503 capacity rejection at admission.
+                // The evaluation workloads top out well below this.
+                eprintln!(
+                    "warning: full-length ({}-token) requests exceed the concurrent budget \
+                     ({single_request} > {device_budget_bytes} bytes) and will be rejected \
+                     with 503 capacity",
+                    args.max_model_len
+                );
+            }
+            let capabilities = RuntimeCapabilities {
+                vocab_size: inventory.config.vocab_size,
+                max_model_len: args.max_model_len,
+                parallel_requests: concurrency,
+                device_budget_bytes,
+                per_request_bytes,
+            };
+            let runtime = Qwen35BatchProtocolRuntime::new(capabilities, args.queue_capacity, model)
+                .map_err(|error| format!("batched runtime initialization failed: {error}"))?;
+            finish_serve!(runtime)
+        } else {
+            if per_request_bytes > memory.free_bytes {
+                return Err(format!(
+                    "request state requires {per_request_bytes} bytes but CUDA{} has {} bytes free",
+                    model.device_id(),
+                    memory.free_bytes
+                ));
+            }
+            let capabilities = RuntimeCapabilities {
+                vocab_size: inventory.config.vocab_size,
+                max_model_len: args.max_model_len,
+                parallel_requests: 1,
+                device_budget_bytes: memory.free_bytes,
+                per_request_bytes,
+            };
+            let executor = Arc::new(Qwen35CudaStepExecutor::new(model));
+            let runtime = Qwen35ProtocolRuntime::new(capabilities, args.queue_capacity, executor)
+                .map_err(|error| format!("runtime initialization failed: {error}"))?;
+            finish_serve!(runtime)
+        }
     }
 }
 

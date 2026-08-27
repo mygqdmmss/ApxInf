@@ -86,6 +86,53 @@ __global__ void qwen35_gdn_conv_bf16_kernel(
   if (!isfinite(__bfloat162float(output[channel]))) atomicOr(error_flags, 2U);
 }
 
+// Batched single-token convolution: one blockIdx.y per request. Each
+// request's ring buffers live in its own allocation (device pointer arrays),
+// while the activation input/output rows are contiguous [batch, channels]
+// matrices. The per-channel body is copied verbatim from the single-request
+// kernel above, so each request's result is bit-identical to a serial call.
+__global__ void qwen35_gdn_conv_batch_bf16_kernel(
+    const unsigned long long* ring_in_ptrs,
+    const unsigned long long* ring_out_ptrs, const __nv_bfloat16* input,
+    const __nv_bfloat16* weights, __nv_bfloat16* output, const int* cursors,
+    uint32_t* error_flags, int channels, int kernel) {
+  const int request = blockIdx.y;
+  const int channel = blockIdx.x * blockDim.x + threadIdx.x;
+  if (channel >= channels) return;
+  const __nv_bfloat16* ring_in =
+      reinterpret_cast<const __nv_bfloat16*>(ring_in_ptrs[request]);
+  __nv_bfloat16* ring_out =
+      reinterpret_cast<__nv_bfloat16*>(ring_out_ptrs[request]);
+  const int cursor = cursors[request];
+  const __nv_bfloat16* input_row =
+      input + static_cast<int64_t>(request) * channels;
+  __nv_bfloat16* output_row = output + static_cast<int64_t>(request) * channels;
+
+  const int64_t base = static_cast<int64_t>(channel) * kernel;
+  for (int slot = 0; slot < kernel; ++slot) {
+    ring_out[base + slot] = ring_in[base + slot];
+  }
+
+  const float current = __bfloat162float(input_row[channel]);
+  if (!isfinite(current)) atomicOr(error_flags, 1U);
+  ring_out[base + cursor] = __float2bfloat16(current);
+
+  float sum = 0.0f;
+  for (int offset = 0; offset < kernel; ++offset) {
+    const float value =
+        __bfloat162float(ring_out[base + ((cursor + 1 + offset) % kernel)]);
+    const float weight = __bfloat162float(weights[base + offset]);
+    if (!isfinite(weight) || !isfinite(value)) atomicOr(error_flags, 1U);
+    sum += value * weight;
+  }
+  const float activated = qwen35_gdn_silu(sum);
+  if (!isfinite(sum) || !isfinite(activated)) atomicOr(error_flags, 2U);
+  output_row[channel] = __float2bfloat16(activated);
+  if (!isfinite(__bfloat162float(output_row[channel]))) {
+    atomicOr(error_flags, 2U);
+  }
+}
+
 // Sequence prefill follows the causal_conv1d semantics used by the
 // Transformers reference: each row sees only the current row and the prior
 // kernel-1 rows, with zero-filled left padding. One thread owns one channel
@@ -235,6 +282,138 @@ __global__ void qwen35_gdn_recurrent_bf16_f32_kernel(
     }
     output[value_base + value_dimension] = __float2bfloat16(result);
     if (!isfinite(__bfloat162float(output[value_base + value_dimension]))) {
+      atomicOr(error_flags, 2U);
+    }
+  }
+}
+
+// Batched single-token gated-delta update: one blockIdx.y per request, with
+// per-request FP32 state pointer arrays and contiguous [batch, ...] rows for
+// q/k/v/a/b and the output. The per-head body is copied verbatim from the
+// single-request kernel above (same thread mapping, same accumulation
+// order), so each request's output and state update are bit-identical to a
+// serial call.
+__global__ void qwen35_gdn_recurrent_batch_bf16_f32_kernel(
+    const unsigned long long* state_in_ptrs,
+    const unsigned long long* state_out_ptrs, const __nv_bfloat16* query,
+    const __nv_bfloat16* key, const __nv_bfloat16* value,
+    const __nv_bfloat16* a, const __nv_bfloat16* b,
+    const __nv_bfloat16* a_log, const __nv_bfloat16* dt_bias,
+    __nv_bfloat16* output, uint32_t* error_flags, int key_heads,
+    int value_heads, int key_dim, int value_dim) {
+  const int request = blockIdx.y;
+  const int head = blockIdx.x;
+  if (head >= value_heads) return;
+  const float* state_in =
+      reinterpret_cast<const float*>(state_in_ptrs[request]);
+  float* state_out = reinterpret_cast<float*>(state_out_ptrs[request]);
+  const int64_t qk_row = static_cast<int64_t>(request) * key_heads * key_dim;
+  const int64_t v_row = static_cast<int64_t>(request) * value_heads * value_dim;
+  const int64_t ab_row = static_cast<int64_t>(request) * value_heads;
+  const __nv_bfloat16* query_row = query + qk_row;
+  const __nv_bfloat16* key_row = key + qk_row;
+  const __nv_bfloat16* value_row = value + v_row;
+  const __nv_bfloat16* a_row = a + ab_row;
+  const __nv_bfloat16* b_row = b + ab_row;
+  __nv_bfloat16* output_row = output + v_row;
+
+  const int repeat_factor = value_heads / key_heads;
+  const int key_head = head / repeat_factor;
+
+  __shared__ float query_inverse_norm;
+  __shared__ float key_inverse_norm;
+  if (threadIdx.x == 0) {
+    float query_sum = 0.0f;
+    float key_sum = 0.0f;
+    const int64_t head_base = static_cast<int64_t>(key_head) * key_dim;
+    for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
+      const __nv_bfloat16 query_bf16 = query_row[head_base + key_dimension];
+      const __nv_bfloat16 key_bf16 = key_row[head_base + key_dimension];
+      const float query_value = __bfloat162float(query_bf16);
+      const float key_value = __bfloat162float(key_bf16);
+      if (!isfinite(query_value) || !isfinite(key_value)) {
+        atomicOr(error_flags, 1U);
+      }
+      query_sum += __bfloat162float(qwen35_gdn_bf16_square(query_bf16));
+      key_sum += __bfloat162float(qwen35_gdn_bf16_square(key_bf16));
+    }
+    query_inverse_norm = qwen35_gdn_bf16_l2_scale(query_sum);
+    key_inverse_norm = qwen35_gdn_bf16_l2_scale(key_sum);
+    if (!isfinite(query_inverse_norm) || !isfinite(key_inverse_norm)) {
+      atomicOr(error_flags, 2U);
+    }
+  }
+  __syncthreads();
+
+  const float a_value = __bfloat162float(a_row[head]);
+  const float b_value = __bfloat162float(b_row[head]);
+  const float a_log_value = __bfloat162float(a_log[head]);
+  const float dt_bias_value = __bfloat162float(dt_bias[head]);
+  if (!isfinite(a_value) || !isfinite(b_value) || !isfinite(a_log_value) ||
+      !isfinite(dt_bias_value)) {
+    atomicOr(error_flags, 1U);
+  }
+  const float decay_log =
+      -expf(a_log_value) * qwen35_gdn_softplus(a_value + dt_bias_value);
+  const float decay = expf(decay_log);
+  const float beta = __bfloat162float(
+      __float2bfloat16(qwen35_gdn_sigmoid(b_value)));
+  if (!isfinite(decay) || !isfinite(beta)) atomicOr(error_flags, 2U);
+
+  const int64_t state_base =
+      static_cast<int64_t>(head) * key_dim * value_dim;
+  const int64_t value_base = static_cast<int64_t>(head) * value_dim;
+  const int64_t query_base = static_cast<int64_t>(key_head) * key_dim;
+  const float query_scale = rsqrtf(static_cast<float>(key_dim));
+
+  for (int value_dimension = threadIdx.x; value_dimension < value_dim;
+       value_dimension += blockDim.x) {
+    float memory = 0.0f;
+    for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
+      const int64_t state_index =
+          state_base + static_cast<int64_t>(key_dimension) * value_dim +
+          value_dimension;
+      const float old_value = state_in[state_index];
+      const float decayed = old_value * decay;
+      state_out[state_index] = decayed;
+      const float key_value =
+          qwen35_gdn_bf16_l2_value(
+              __bfloat162float(key_row[query_base + key_dimension]),
+              key_inverse_norm);
+      if (!isfinite(old_value) || !isfinite(decayed) || !isfinite(key_value)) {
+        atomicOr(error_flags, 1U);
+      }
+      memory += decayed * key_value;
+    }
+
+    const float value_value =
+        __bfloat162float(value_row[value_base + value_dimension]);
+    const float delta = (value_value - memory) * beta;
+    if (!isfinite(value_value) || !isfinite(memory) || !isfinite(delta)) {
+      atomicOr(error_flags, 2U);
+    }
+    float result = 0.0f;
+    for (int key_dimension = 0; key_dimension < key_dim; ++key_dimension) {
+      const int64_t state_index =
+          state_base + static_cast<int64_t>(key_dimension) * value_dim +
+          value_dimension;
+      const float key_value =
+          qwen35_gdn_bf16_l2_value(
+              __bfloat162float(key_row[query_base + key_dimension]),
+              key_inverse_norm);
+      const float updated = state_out[state_index] + key_value * delta;
+      state_out[state_index] = updated;
+      const float query_value =
+          qwen35_gdn_bf16_l2_value(
+              __bfloat162float(query_row[query_base + key_dimension]),
+              query_inverse_norm);
+      result += updated * query_value * query_scale;
+      if (!isfinite(updated) || !isfinite(query_value) || !isfinite(result)) {
+        atomicOr(error_flags, 2U);
+      }
+    }
+    output_row[value_base + value_dimension] = __float2bfloat16(result);
+    if (!isfinite(__bfloat162float(output_row[value_base + value_dimension]))) {
       atomicOr(error_flags, 2U);
     }
   }

@@ -116,10 +116,21 @@ struct Usage {
     reserved_bytes: usize,
 }
 
-#[derive(Debug)]
 pub struct RuntimeAdmission {
     capabilities: RuntimeCapabilities,
     usage: Arc<Mutex<Usage>>,
+    request_sizer: Option<Arc<dyn Fn(&RuntimeRequest) -> usize + Send + Sync>>,
+}
+
+impl std::fmt::Debug for RuntimeAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeAdmission")
+            .field("capabilities", &self.capabilities)
+            .field("usage", &self.usage)
+            .field("request_sizer", &self.request_sizer.is_some())
+            .finish()
+    }
 }
 
 impl RuntimeAdmission {
@@ -130,6 +141,26 @@ impl RuntimeAdmission {
                 active_requests: 0,
                 reserved_bytes: 0,
             })),
+            request_sizer: None,
+        }
+    }
+
+    /// Admission that reserves memory per request from its actual token
+    /// capacity instead of the worst-case `per_request_bytes`. Used by the
+    /// concurrent batched runtime, where reserving `max_model_len` KV for
+    /// every slot would forbid any useful concurrency; the serial runtime
+    /// keeps the conservative prompt-independent accounting unchanged.
+    pub fn with_request_sizer(
+        capabilities: RuntimeCapabilities,
+        sizer: Arc<dyn Fn(&RuntimeRequest) -> usize + Send + Sync>,
+    ) -> Self {
+        Self {
+            capabilities,
+            usage: Arc::new(Mutex::new(Usage {
+                active_requests: 0,
+                reserved_bytes: 0,
+            })),
+            request_sizer: Some(sizer),
         }
     }
 
@@ -147,7 +178,10 @@ impl RuntimeAdmission {
             request.max_new_tokens,
             self.capabilities.max_model_len,
         )?;
-        let reserved_bytes = self.capabilities.per_request_bytes;
+        let reserved_bytes = match &self.request_sizer {
+            Some(sizer) => sizer(request),
+            None => self.capabilities.per_request_bytes,
+        };
         let mut usage = self.usage.lock().map_err(|_| RuntimeError::WorkerStopped)?;
         let active_ok = usage.active_requests < self.capabilities.parallel_requests;
         let bytes_ok = usage
@@ -155,6 +189,16 @@ impl RuntimeAdmission {
             .checked_add(reserved_bytes)
             .is_some_and(|total| total <= self.capabilities.device_budget_bytes);
         if !active_ok || !bytes_ok {
+            if self.request_sizer.is_some() {
+                eprintln!(
+                    "admission capacity: active={}/{} reserved={}+{}/{}",
+                    usage.active_requests,
+                    self.capabilities.parallel_requests,
+                    usage.reserved_bytes,
+                    reserved_bytes,
+                    self.capabilities.device_budget_bytes
+                );
+            }
             return Err(RuntimeError::Capacity);
         }
         usage.active_requests += 1;

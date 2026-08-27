@@ -154,6 +154,62 @@ pub fn request_state_bytes(
         .ok_or_else(|| "request state byte estimate overflow".to_string())
 }
 
+/// Per-request resident bytes for a request of `capacity = prompt +
+/// max_new_tokens` tokens: its full-attention KV pages plus the GDN
+/// convolution/recurrent state. Excludes the transient prefill workspaces,
+/// which the concurrent runtime sizes once (prefill is serialized on the
+/// worker) and subtracts from the admission budget up front. The serial
+/// runtime keeps using the conservative `request_state_bytes` instead.
+pub fn request_resident_bytes(
+    config: &Qwen35ModelConfig,
+    capacity: usize,
+) -> Result<usize, String> {
+    if capacity == 0 {
+        return Err("request capacity must be non-zero".into());
+    }
+    let kv_bytes = config
+        .full_attention_layer_count()
+        .checked_mul(2)
+        .and_then(|value| value.checked_mul(config.full_attention_kv_heads))
+        .and_then(|value| value.checked_mul(config.full_attention_head_dim))
+        .and_then(|value| value.checked_mul(capacity))
+        .and_then(|value| value.checked_mul(2))
+        .ok_or_else(|| "KV byte estimate overflow".to_string())?;
+    let gdn_channels = config
+        .linear_key_heads
+        .checked_mul(config.linear_head_dim)
+        .and_then(|value| value.checked_mul(2))
+        .and_then(|value| {
+            value.checked_add(
+                config
+                    .linear_value_heads
+                    .checked_mul(config.linear_head_dim)?,
+            )
+        })
+        .ok_or_else(|| "GDN convolution dimension overflow".to_string())?;
+    let conv_bytes = gdn_channels
+        .checked_mul(config.linear_conv_kernel_dim)
+        .and_then(|value| value.checked_mul(2))
+        .and_then(|value| value.checked_mul(3))
+        .ok_or_else(|| "GDN convolution byte estimate overflow".to_string())?;
+    let recurrent_bytes = config
+        .linear_value_heads
+        .checked_mul(config.linear_head_dim)
+        .and_then(|value| value.checked_mul(config.linear_head_dim))
+        .and_then(|value| value.checked_mul(4))
+        .and_then(|value| value.checked_mul(3))
+        .ok_or_else(|| "GDN recurrent byte estimate overflow".to_string())?;
+    config
+        .gdn_layer_count()
+        .checked_mul(
+            conv_bytes
+                .checked_add(recurrent_bytes)
+                .ok_or_else(|| "GDN byte estimate overflow".to_string())?,
+        )
+        .and_then(|value| value.checked_add(kv_bytes))
+        .ok_or_else(|| "request resident byte estimate overflow".to_string())
+}
+
 /// Whether the multimodal capability is enabled for this process. Off by
 /// default: the vision tower is not loaded, `/v1/chat/completions` fails
 /// closed, and the text configuration is byte-identical to the text-only
@@ -479,6 +535,175 @@ mod cuda_runtime {
         prefill_calls: usize,
     }
 
+    /// Advance several independent sessions by one decode step as a single
+    /// batched forward. Each session must be "drained": its previous token
+    /// already consumed (`pending == None`), a last input available, and
+    /// budget remaining — the scheduler guarantees this. After the call every
+    /// session holds its next token in `pending`, exactly as if
+    /// `next_token`'s internal `forward_token` had run serially; the batched
+    /// layer kernels are per-row bit-identical to the serial path.
+    ///
+    /// On error the affected sessions are left in an indeterminate state and
+    /// must all be dropped by the caller.
+    pub fn decode_step_batch(sessions: &mut [&mut Qwen35CudaSession]) -> Result<(), String> {
+        let batch = sessions.len();
+        if batch == 0 {
+            return Err("batched decode requires at least one session".into());
+        }
+        let model = Arc::clone(&sessions[0].model);
+        let mut tokens = Vec::with_capacity(batch);
+        for (index, session) in sessions.iter().enumerate() {
+            if !Arc::ptr_eq(&session.model, &model) {
+                return Err(format!("session {index} belongs to a different model"));
+            }
+            if session.pending.is_some() {
+                return Err(format!("session {index} has an unconsumed pending token"));
+            }
+            if session.emitted >= session.max_new_tokens {
+                return Err(format!("session {index} has exhausted its budget"));
+            }
+            if session.position >= model.max_model_len {
+                return Err(format!("session {index} exceeds max_model_len"));
+            }
+            tokens.push(
+                session
+                    .last_input
+                    .ok_or_else(|| format!("session {index} has no previous input"))?,
+            );
+        }
+
+        // A batch of one gains nothing from the batched plumbing (pointer
+        // array uploads, row stacks) and pays ~10% TPOT for it (measured on
+        // the 16K single-request cell). Run the serial step instead; the
+        // numerics are identical either way.
+        if batch == 1 {
+            let session = &mut *sessions[0];
+            session.forward_token(tokens[0])?;
+            let hidden = session
+                .last_hidden
+                .as_ref()
+                .ok_or_else(|| "decode produced no hidden state".to_string())?;
+            let logits = session.logits_from_hidden(hidden)?;
+            session.pending = Some(
+                greedy_argmax(&logits, model.config.vocab_size)
+                    .map_err(|error| error.to_string())?,
+            );
+            return Ok(());
+        }
+
+        let debug_timing = std::env::var("APXINF_Q35_BATCH_DEBUG").is_ok_and(|v| v == "1");
+        let step_start = std::time::Instant::now();
+        let mut gdn_total = std::time::Duration::ZERO;
+        let mut attention_total = std::time::Duration::ZERO;
+        let mut hidden = model
+            .backend
+            .embedding(&model.embedding, &tokens)
+            .map_err(|error| format!("batched embedding failed: {error}"))?;
+        for (layer_index, layer) in model.layers.iter().enumerate() {
+            let layer_start = std::time::Instant::now();
+            hidden = match layer {
+                Layer::Gdn(layer) => {
+                    let mut states: Vec<&mut Qwen35CudaGdnState> = Vec::with_capacity(batch);
+                    for session in sessions.iter_mut() {
+                        match &mut session.states[layer_index] {
+                            State::Gdn(state) => states.push(state),
+                            State::Full(_) => {
+                                return Err(format!(
+                                    "layer {layer_index} state type mismatch in batch"
+                                ))
+                            }
+                        }
+                    }
+                    layer
+                        .decode_token_batch(&model.backend, &hidden, &mut states)
+                        .map_err(|error| {
+                            format!("GDN layer {layer_index} batched decode failed: {error}")
+                        })?
+                }
+                Layer::Full(layer) => {
+                    let positions: Vec<usize> =
+                        sessions.iter().map(|session| session.position).collect();
+                    let mut states: Vec<&mut Qwen35CudaFullAttentionState> =
+                        Vec::with_capacity(batch);
+                    for session in sessions.iter_mut() {
+                        match &mut session.states[layer_index] {
+                            State::Full(state) => states.push(state),
+                            State::Gdn(_) => {
+                                return Err(format!(
+                                    "layer {layer_index} state type mismatch in batch"
+                                ))
+                            }
+                        }
+                    }
+                    layer
+                        .decode_token_batch(&model.backend, &hidden, &positions, &mut states)
+                        .map_err(|error| {
+                            format!(
+                                "full-attention layer {layer_index} batched decode failed: {error}"
+                            )
+                        })?
+                }
+            };
+            if debug_timing {
+                match layer {
+                    Layer::Gdn(_) => gdn_total += layer_start.elapsed(),
+                    Layer::Full(_) => attention_total += layer_start.elapsed(),
+                }
+            }
+        }
+        apxinf_cuda::kernels::qwen35_gdn::drain_deferred_status(
+            model.backend.context(),
+            "batched decode step",
+        )
+        .map_err(|error| error.to_string())?;
+
+        // Batched LM head: one final RMSNorm and one [M, vocab] cuBLAS GEMM
+        // instead of M serial GEMV projections. The GEMM's per-row
+        // accumulation order differs from the serial GEMV (the usual cuBLAS
+        // reassociation), which can flip only exactly-tied logits — the same
+        // accepted trade as the prefill GEMM path.
+        let logits_start = std::time::Instant::now();
+        let normalized = model
+            .backend
+            .rms_norm(&hidden, &model.final_norm, model.config.rms_norm_eps)
+            .map_err(|error| format!("batched final RMSNorm failed: {error}"))?;
+        let logits_gpu = model
+            .lm_head
+            .project(model.backend.context(), &normalized)
+            .map_err(|error| format!("batched LM head failed: {error}"))?;
+        let logits_cpu = model
+            .backend
+            .to_cpu(&logits_gpu)
+            .map_err(|error| format!("batched logits copy failed: {error}"))?;
+        let logits = logits_cpu
+            .to_f32_vec()
+            .map_err(|error| format!("batched logits decode failed: {error}"))?;
+        let vocab = model.config.vocab_size;
+        for (index, session) in sessions.iter_mut().enumerate() {
+            let row = row_slice(&model.backend, &hidden, index)?;
+            session.pending = Some(
+                greedy_argmax(&logits[index * vocab..(index + 1) * vocab], vocab)
+                    .map_err(|error| error.to_string())?,
+            );
+            session.position += 1;
+            session.last_hidden = Some(row);
+            #[cfg(test)]
+            {
+                session.forward_token_calls += 1;
+            }
+        }
+        if debug_timing {
+            eprintln!(
+                "[batch step] batch={batch} total={:.1}ms gdn={:.1}ms attn={:.1}ms logits={:.1}ms",
+                step_start.elapsed().as_secs_f64() * 1e3,
+                gdn_total.as_secs_f64() * 1e3,
+                attention_total.as_secs_f64() * 1e3,
+                logits_start.elapsed().as_secs_f64() * 1e3,
+            );
+        }
+        Ok(())
+    }
+
     impl Qwen35CudaSession {
         fn prefill(
             &mut self,
@@ -586,6 +811,131 @@ mod cuda_runtime {
             self.last_input = input_ids.last().copied();
             self.last_hidden = Some(final_row);
             Ok(())
+        }
+
+        /// Fork this session into an independent copy with bit-identical
+        /// device state (KV pages, GDN convolution/recurrent state, pending
+        /// token, hidden row). Greedy decoding is deterministic, so a fork
+        /// taken right after prefill reproduces the original's exact output
+        /// sequence — this is the prefix-cache fast path for repeated
+        /// prompts. Cost is one device-to-device copy of the request state
+        /// (~0.5 GiB, ~1-2 ms).
+        pub fn fork(&self) -> Result<Qwen35CudaSession, String> {
+            let backend = &self.model.backend;
+            let states = self
+                .states
+                .iter()
+                .map(|state| match state {
+                    State::Gdn(state) => state.deep_clone(backend).map(State::Gdn),
+                    State::Full(state) => state.deep_clone(backend).map(State::Full),
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            let last_hidden = match &self.last_hidden {
+                None => None,
+                Some(hidden) => {
+                    let dims = hidden.shape().dims();
+                    if dims.len() != 2 || dims[0] != 1 {
+                        return Err(format!("fork expects a [1, H] hidden row, got {dims:?}"));
+                    }
+                    Some(
+                        apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+                            self.model.backend.context(),
+                            hidden,
+                            0,
+                            dims[1],
+                        )
+                        .map_err(|error| format!("fork hidden copy: {error}"))?,
+                    )
+                }
+            };
+            // No explicit synchronize: every copy above is stream-ordered on
+            // the context stream, and every future consumer of the cloned
+            // state (batched kernels, further copies) runs on that same
+            // stream, so ordering is guaranteed. A synchronize here would
+            // stall admissions behind whichever batch step is in flight
+            // (~200 ms measured), inflating the co-running requests' TPOT.
+            Ok(Qwen35CudaSession {
+                model: Arc::clone(&self.model),
+                states,
+                position: self.position,
+                emitted: self.emitted,
+                max_new_tokens: self.max_new_tokens,
+                pending: self.pending,
+                last_input: self.last_input,
+                last_hidden,
+                #[cfg(test)]
+                forward_token_calls: 0,
+                #[cfg(test)]
+                prefill_calls: 0,
+            })
+        }
+
+        /// Refill this session in place from `template`, reusing every device
+        /// allocation (the recycled-session fast path: a fresh `fork` pays
+        /// ~320 cudaMallocs, a refill only stream-ordered copies). Requires
+        /// the same model and state geometry; budget and bookkeeping are
+        /// copied so the refilled session is equivalent to a fresh fork.
+        pub fn refill_from(&mut self, template: &Qwen35CudaSession) -> Result<(), String> {
+            if !Arc::ptr_eq(&self.model, &template.model) {
+                return Err("session refill requires the same model".into());
+            }
+            if self.states.len() != template.states.len() {
+                return Err("session refill requires the same layer count".into());
+            }
+            let backend = &self.model.backend;
+            for (destination, source) in self.states.iter_mut().zip(template.states.iter()) {
+                match (destination, source) {
+                    (State::Gdn(destination), State::Gdn(source)) => {
+                        destination.copy_state_from(source, backend)?;
+                    }
+                    (State::Full(destination), State::Full(source)) => {
+                        destination.copy_state_from(source, backend)?;
+                    }
+                    _ => return Err("session refill state type mismatch".into()),
+                }
+            }
+            let last_hidden = match &template.last_hidden {
+                None => None,
+                Some(hidden) => {
+                    let dims = hidden.shape().dims();
+                    Some(
+                        apxinf_cuda::kernels::elementwise::slice_columns_bf16(
+                            backend.context(),
+                            hidden,
+                            0,
+                            dims[1],
+                        )
+                        .map_err(|error| format!("refill hidden copy: {error}"))?,
+                    )
+                }
+            };
+            // Stream-ordered copies need no synchronize; see `fork`.
+            self.position = template.position;
+            self.emitted = template.emitted;
+            self.max_new_tokens = template.max_new_tokens;
+            self.pending = template.pending;
+            self.last_input = template.last_input;
+            self.last_hidden = last_hidden;
+            Ok(())
+        }
+
+        /// Batch-mode consumption: pop the token produced by prefill or the
+        /// last batched step and account for it, without ever running a
+        /// serial forward. Returns `None` once the budget is exhausted.
+        pub fn take_pending_token(&mut self) -> Option<u32> {
+            if self.emitted >= self.max_new_tokens {
+                return None;
+            }
+            let token = self.pending.take()?;
+            self.last_input = Some(token);
+            self.emitted += 1;
+            Some(token)
+        }
+
+        /// True when the session owes more tokens and the next one has not
+        /// been computed yet, i.e. it should join the next batched step.
+        pub fn needs_batched_step(&self) -> bool {
+            self.pending.is_none() && self.emitted < self.max_new_tokens
         }
 
         pub fn next_token(&mut self) -> Result<Option<u32>, String> {
@@ -877,7 +1227,7 @@ mod cuda_runtime {
 }
 
 #[cfg(feature = "cuda")]
-pub use cuda_runtime::{Qwen35CudaModel, Qwen35CudaSession};
+pub use cuda_runtime::{decode_step_batch, Qwen35CudaModel, Qwen35CudaSession};
 
 #[cfg(test)]
 mod tests {
