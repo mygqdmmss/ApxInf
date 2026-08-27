@@ -62,8 +62,13 @@ def textbox(slide, x, y, w, h, *, anchor=MSO_ANCHOR.TOP):
     return tf
 
 
+BODY_BUMP = 2  # 正文类字号统一放大（标题 >=16pt 不受影响）
+
+
 def para(tf, text, *, size=14, bold=False, color=INK, font=CN, space_after=4,
          align=PP_ALIGN.LEFT, first=False, line=None):
+    if size < 16:
+        size += BODY_BUMP
     p = tf.paragraphs[0] if first else tf.add_paragraph()
     p.alignment = align
     p.space_after = Pt(space_after)
@@ -160,6 +165,8 @@ def metric(slide, x, y, w, big, label, sub=None, color=ACCENT):
 
 
 def bullets(slide, x, y, w, items, *, size=14, gap=9, bullet="—"):
+    if size < 16:
+        size += BODY_BUMP
     # Reserve only the space that actually remains above the footer, so the
     # placeholder box never extends past the canvas.
     avail = H - y - Inches(0.62)
@@ -413,7 +420,7 @@ def build() -> None:
     para(tf, "修复效果（双卡双副本验证）", size=13, bold=True, color=GOOD, first=True)
     rows = [
         ("测量项", "修复前", "修复后", "倍数"),
-        ("attention 阶梯（单层）", "23.06 s", "0.659 s", "35.0×"),
+        ("attention 单层阶梯", "23.06 s", "0.659 s", "35.0×"),
         ("单次 sdpa（kv=16384）", "2053.7 ms", "13.7 ms", "150×"),
         ("服务 TTFT 8K", "64.1 s", "17.8 s", "3.6×"),
         ("服务 TTFT 16K", "408.7 s", "31.9 s", "12.8×"),
@@ -652,8 +659,8 @@ def build() -> None:
     s = blank(prs)
     y = header(s, "可复现性与提交材料", "REPRODUCIBILITY")
 
-    rect(s, Inches(0.7), y, Inches(11.9), Inches(2.02), fill=RGBColor(0x1A, 0x1D, 0x24))
-    tf = textbox(s, Inches(1.0), y + Inches(0.14), Inches(11.3), Inches(1.78))
+    rect(s, Inches(0.7), y, Inches(11.9), Inches(2.1), fill=RGBColor(0x1A, 0x1D, 0x24))
+    tf = textbox(s, Inches(1.0), y + Inches(0.14), Inches(11.3), Inches(1.9))
     for i, line in enumerate([
         "# 提交 commit（验收以此为准）",
         "06993a2d2642c6f7177b57493b797d5d537e4d64    branch: integrate/member2",
@@ -661,13 +668,12 @@ def build() -> None:
         "python3 benchmarks/qwen38_4090/evaluation/test.py check      # → assignment checks passed",
         "cargo build --release --features cuda-no-nvtx --locked --bin apxinf",
         "target/release/apxinf serve --model <ckpt> --revision 63768c10... --gpu-uuid GPU-343bc895...",
-        "APXINF_ENABLE_MULTIMODAL=1 target/release/apxinf serve ...   # 多模态配置（可选，单开关）",
-        "APXINF_Q35_MAX_CONCURRENCY=4 ... serve ... --queue-capacity 4  # C4 并发配置（可选，单开关）",
+        "# 可选单开关：APXINF_ENABLE_MULTIMODAL=1（多模态）；APXINF_Q35_MAX_CONCURRENCY=4 + --queue-capacity 4（C4）",
     ]):
         color = RGBColor(0x7E, 0xC8, 0xFF) if line.startswith("#") else RGBColor(0xE6, 0xEA, 0xF0)
         para(tf, line, size=11.5, color=color, font=MONO, first=(i == 0), space_after=2)
 
-    y += Inches(2.2)
+    y += Inches(2.3)
     tf = textbox(s, Inches(0.7), y, Inches(5.8), Inches(0.3))
     para(tf, "提交材料对应关系", size=13, bold=True, color=ACCENT, first=True)
     bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
