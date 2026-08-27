@@ -14,10 +14,12 @@
 >
 > | 成员 | 贡献占比 | 实际承担 |
 > |---|---:|---|
-> | **程仁龙**（`mygqdmmss`） | **约 95%** | 模型/runtime 主线、CUDA kernel、protocol surface、oracle 与 hidden 代理集、性能实验、显存账本、REPORT 与最终集成 |
+> | **程仁龙**（`mygqdmmss`） | **约 95%** | 模型/runtime 主线、CUDA kernel、protocol surface、oracle 与 hidden 代理集、性能实验、显存账本、多模态与 C4 两项 bonus、REPORT 与最终集成 |
 > | 王天民（`wang1145140503`） | 约 5% | 离线 benchmark 脚手架（shape inventory、experiment validator、campaign manifest 与交接记录，8/23 交付） |
 >
 > 原规划的多人并行组织实际退化为程仁龙单人串行推进（该偏差记录于执行入口文档）。代码准备可并行，服务器真实 GPU/模型任务进入带锁队列；正式成绩只以 GPU0 的单卡重放为准。
+>
+> **实际执行结果（2026-08-27，证据见 REPORT.md）**：文本 eligibility 全门禁通过；TTFT 最高约 48 倍、TPOT 约 2 倍（17 次配对实验，9 接受 8 拒绝）；**多模态与 C4 两项 bonus 均已交付**——多模态为 vision 塔 CUDA 移植 + `/v1/chat/completions`（自建探针 4/4、文本数值零变化），C4 为批式 protocol runtime（官方校准 run 全部效度门通过：Jain 0.9993、goodput 23.53 tok/s、单请求零回归），各有独立单开关可回滚。方案一主线的技术路线按规划落地：GDN 先逐 token eager 取资格、后接 chunk 序列路径，prefill 解量化 + BF16 tensor-core GEMM（规划的 M-W4-P，TTFT −74%），全注意力 gate/partial-RoPE 语义逐层对拍通过；规划外由测量发现的最大杠杆是 dequant scratch 池化、行协作 causal softmax（16K 真瓶颈）与 prefill chunk 64→512。方案二规划的 M=1 decode GEMV 优化以 packed GEMV 落地（TPOT −35%），其余五个 GEMV 微优化候选全部实测拒绝（含 SASS 反汇编根因），CUDA Graph 未实施（decode 归因显示收益不在 launch 开销）；方案三规划的 C4 落地、C8 因显存边界未交付（已量化）；长上下文 >32K、MTP、prefix cache 常驻化未进入交付。无平台批准的 scorer 产物，不声称任何评分结论。
 
 ---
 

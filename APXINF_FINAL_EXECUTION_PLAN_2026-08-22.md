@@ -8,7 +8,9 @@
 >
 > 相关三套路线的完整技术比较见 [APXINF_QWEN38_TECHNICAL_PLANS.md](APXINF_QWEN38_TECHNICAL_PLANS.md)。本文件是实际执行时的唯一主线方案。
 
-> **分工（据 git 记录，2026-08-26 订正）**：本项目为两人团队。**程仁龙**（`mygqdmmss`）承担约 **95%**——模型/runtime 主线、CUDA kernel、协议 surface、oracle 与 hidden 代理集、全部性能实验、显存账本、REPORT 与最终集成；**王天民**（`wang1145140503`）承担约 **5%**——`scripts/campaign/` 与 `benchmarks/campaign/manifests/` 下的离线 benchmark 脚手架（shape inventory、experiment validator，8/23 交付），未进入服务/模型主线。本文原为多 lane 并行规划，实际执行为程仁龙单人串行推进（该偏差本身即提交材料要求的"设计变化"记录，正文已按实际分工订正）；服务器带锁队列（`flock`）与单卡正式重放的纪律始终严格执行。
+> **分工（据 git 记录，2026-08-26 订正）**：本项目为两人团队。**程仁龙**（`mygqdmmss`）承担约 **95%**——模型/runtime 主线、CUDA kernel、协议 surface、oracle 与 hidden 代理集、全部性能实验、显存账本、多模态与 C4 两项 bonus、REPORT 与最终集成；**王天民**（`wang1145140503`）承担约 **5%**——`scripts/campaign/` 与 `benchmarks/campaign/manifests/` 下的离线 benchmark 脚手架（shape inventory、experiment validator，8/23 交付），未进入服务/模型主线。本文原为多 lane 并行规划，实际执行为程仁龙单人串行推进（该偏差本身即提交材料要求的"设计变化"记录，正文已按实际分工订正）；服务器带锁队列（`flock`）与单卡正式重放的纪律始终严格执行。
+>
+> **实际执行结果（2026-08-27 订正，证据均在 REPORT.md）**：本文规划的各层目标最终完成情况——① 文本 eligibility 全门禁通过（协议 12/12、公开功能 6/6 精确、200 请求 soak 100%、7/7 性能 cell 有效）；② 性能工程 TTFT 最高约 48 倍、TPOT 约 2 倍（17 次单变量配对实验，9 接受 8 拒绝）——主线技术路线与规划的对照：GDN 按规划先 eager 取资格、后接 chunk 序列路径；prefill 解量化 + BF16 tensor-core GEMM（即规划的 M-W4-P 实验，TTFT −74%）与 decode packed GEMV（TPOT −35%）均按规划落地；规划外由测量发现的三个最大杠杆是 dequant scratch 池化（消除 cudaMalloc 风暴）、行协作 causal softmax（16K 真瓶颈，单层 −98%）与 prefill chunk 64→512；规划的 CUDA Graph decode 未实施（decode 归因显示收益不在 launch 开销），MTP 按规划的条件门槛评估后未实施；③ **多模态 bonus 已交付**（vision 塔 CUDA 移植 + `/v1/chat/completions`，自建探针 4/4、图文混合 soak 36/36、文本数值零变化，`APXINF_ENABLE_MULTIMODAL` 单开关）；④ **C4 多请求 bonus 已交付**（批式 protocol runtime，官方 evaluator 校准 run 全部效度门通过：成功率/正确率 1.0、Jain 0.9993、p95 TTFT/TPOT 门槛内、goodput 23.53 tok/s，`APXINF_Q35_MAX_CONCURRENCY` 单开关，单请求路径零回归）。未交付并如实说明：C8（显存边界已量化：8 份请求态需 4.1 GiB 超出 2.36 GiB 预算）、>32K 长上下文、MTP、prefix cache 常驻化。无平台批准的 scorer 产物，不声称任何评分结论。
 
 ## 1. 结论先行
 
@@ -324,7 +326,7 @@ nvidia-smi --query-gpu=index,uuid,name,memory.total,driver_version --format=csv
 
 | 人员 | 贡献占比 | 实际交付 |
 |---|---:|---|
-| **程仁龙** | **约 95%** | Qwen3.8-27B config/loader/weights、48 层 GDN 与 16 层全注意力 CUDA 实现、W4A16 解包与 GEMM/GEMV kernel、HTTP/SSE 协议 surface 与全部负控、admission 与断连取消、oracle 生成与 hidden 代理集、十七次配对性能实验、显存账本、REPORT.md、最终集成与提交 |
+| **程仁龙** | **约 95%** | Qwen3.8-27B config/loader/weights、48 层 GDN 与 16 层全注意力 CUDA 实现、W4A16 解包与 GEMM/GEMV kernel、HTTP/SSE 协议 surface 与全部负控、admission 与断连取消、oracle 生成与 hidden 代理集、十七次配对性能实验、显存账本、多模态 vision 塔移植与图文链路、C4 批式调度与批式 kernel、REPORT.md、最终集成与提交 |
 | 王天民 | 约 5% | `scripts/campaign/shape_inventory.py`、`scripts/campaign/validate_experiment.py`、`benchmarks/campaign/` 下的 manifest 与 README、`docs/collaboration/records/` 的交接记录 |
 
 通用约束：不修改 `evaluation/` 下任何合同/scorer；不把 profile 数字直接宣称为端到端成绩；无证据时不开启 bonus、不改合同。原规划"各领一个 bounded prompt、一个分支、一个 GPU"的并行组织方式未能落地，实际为单人串行推进；服务器带锁队列与单卡正式重放的纪律始终执行。

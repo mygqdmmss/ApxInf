@@ -201,7 +201,7 @@ def build() -> None:
         ("架构", "48 GDN + 16 全注意力，共 64 层"),
         ("量化", "compressed-tensors W4A16 group-32 asymmetric"),
         ("硬件", "单张 RTX 4090 (SM89, 24 GiB)，TP=PP=DP=1"),
-        ("提交", "commit 489f77adeeca08ae798df704ffe625f97f2bfca6"),
+        ("提交", "commit 06993a2d2642c6f7177b57493b797d5d537e4d64"),
     ]):
         tf = textbox(s, Inches(0.9) + Inches(3.05) * (i % 2),
                      y + Inches(0.62) * (i // 2), Inches(3.0), Inches(0.55))
@@ -223,9 +223,10 @@ def build() -> None:
          size=12.5, color=MUTED, space_after=4)
     para(tf, "② 用可回滚的配对实验做性能工程：九项接受、八项拒绝，TTFT 约 47 倍、TPOT 约 2 倍",
          size=12.5, color=MUTED, space_after=4)
-    para(tf, "③ 交付多模态 bonus：完整 vision 路径 + /v1/chat/completions，自建探针 4/4，文本数值零变化",
+    para(tf, "③ 交付双 bonus：多模态图文链路（探针 4/4、文本数值零变化）+ C4 四路并发"
+             "（官方校准全门通过，goodput 23.5 tok/s）",
          size=12.5, color=MUTED, space_after=4)
-    para(tf, "④ 如实报告边界：无平台批准的 scorer 产物，因此不声称任何评分结论",
+    para(tf, "④ 如实报告边界：无平台批准的 scorer 产物，不声称任何评分结论",
          size=12.5, color=WARN, space_after=0)
     footer(s, "所有数据均来自实测记录（/tmp/apxinf-evidence/ 与 REPORT.md），无估算值")
 
@@ -264,8 +265,8 @@ def build() -> None:
         ("公开功能 6/6 精确 ", "含三个 8K longdoc，EOS 提前终止正常"),
         ("200 请求混合 soak 100% ", "无 OOM / NaN / fallback / Xid，失败后可恢复"),
         ("proxy hidden 11/12 ", "达到 ≥11/12 资格线（官方 hidden 集本机不可得）"),
-        ("多模态 bonus 交付 ", "自建图片探针 4/4 精确、混合 soak 36/36，"
-                            "冻结文本请求输出字节不变"),
+        ("多模态 + C4 双 bonus 交付 ", "图文探针 4/4、混合 soak 36/36；C4 官方校准"
+                                    "全门通过（Jain 0.9993，goodput 23.53 tok/s）"),
         ("峰值显存 19958 MiB ", "文本配置未超 24564 MiB；多模态配置峰值 20914 MiB"),
     ], size=12.5, gap=8)
     footer(s, "口径遵循合同：warmup 1 次 + 测 5 次取中位数，TTFT/TPOT 的 CV 均 ≤ 10%")
@@ -542,7 +543,8 @@ def build() -> None:
                               "要突破需 M ≥ 8 的融合 dequant-MMA"),
         ("长上下文封顶 3.33 分 ", "65536 需 4923 MiB、可用 4606 MiB；131072 需 9403 MiB，"
                                "即便 INT8 KV 也不可行"),
-        ("C4/C8 与 MTP 未交付 ", "缺 continuous batching 调度器与投机解码链路，未进入交付范围"),
+        ("C8 与 MTP 未交付 ", "C4 已交付；C8 差在显存——8 份完整请求态需 4.1 GiB，"
+                            "超出 2.36 GiB 预算，共享 scratch 的路径已量化但未实现"),
     ], size=12, gap=9)
     footer(s, "PR review 的「分析与决策」正建立在这些负结果之上：八项拒绝各有数据与根因")
 
@@ -589,25 +591,73 @@ def build() -> None:
          size=11.5, color=MUTED, space_after=0, line=1.3)
     footer(s, "回滚 = 取消 APXINF_ENABLE_MULTIMODAL 单开关；文本 layer-1/layer-2 全部性能数字均在无该开关的配置下测得，不受影响")
 
+    # ───────────────────────── 11.5 C4 concurrent bonus ─────────────────────────
+    s = blank(prs)
+    y = header(s, "多请求 bonus：C4 四路并发交付", "BONUS")
+    tf = textbox(s, Inches(0.7), y, Inches(11.9), Inches(0.42))
+    para(tf, "批式 protocol runtime 仅在 APXINF_Q35_MAX_CONCURRENCY>1 时启用，默认单请求路径零改动；"
+             "官方 evaluator 校准 run 全部效度门通过。",
+         size=13.5, color=INK, first=True)
+
+    y += Inches(0.56)
+    tf = textbox(s, Inches(0.7), y, Inches(5.8), Inches(0.3))
+    para(tf, "实现要点", size=13, bold=True, color=GOOD, first=True)
+    bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
+        ("批式调度 ", "admission 4 permits + 单 batch worker，每轮一步批式 decode；"
+                    "两阶段交付修复 17 µs 窗口内 permit 未释放导致的 503 竞态"),
+        ("批式 kernel 位相等 ", "GDN conv/recurrent、partial RoPE 的批式版与串行路径"
+                             "逐字节一致（真实权重多步回归断言）"),
+        ("prefix cache + 会话回收池 ", "相同 prompt 从模板 fork 约 2 ms；"
+                                    "cudaMallocAsync 流序分配把冷 fork 从 330 ms 降到个位数 ms"),
+        ("单请求零回归 ", "TPOT 62-68 ms 在冻结基线带内，冻结输出字节不变；"
+                       "batch=1 自动走原串行路径"),
+    ], size=12, gap=9)
+
+    tf = textbox(s, Inches(6.9), y, Inches(5.8), Inches(0.3))
+    para(tf, "官方校准结果（multi-c4-text-perf-1024）", size=13, bold=True, color=ACCENT, first=True)
+    rows = [
+        ("指标", "实测", "门槛"),
+        ("success / correctness", "1.0 / 1.0", "= 1.0"),
+        ("Jain 公平性", "0.9993", ">= 0.95"),
+        ("p95 TTFT", "1.789 s", "<= 2.496 s"),
+        ("p95 TPOT", "173.9 ms", "<= 186.9 ms"),
+        ("goodput", "23.53 tok/s", "计分指标"),
+        ("no_fallback / 健康", "true", "必须为真"),
+    ]
+    table(s, Inches(6.9), y + Inches(0.4), Inches(5.7),
+          rows, [Inches(2.3), Inches(1.7), Inches(1.7)], row_h=Inches(0.34))
+
+    rect(s, Inches(0.7), Inches(5.62), Inches(11.9), Inches(1.1), fill=PANEL)
+    tf = textbox(s, Inches(0.95), Inches(5.76), Inches(11.4), Inches(0.85))
+    para(tf, "C8 边界如实说明", size=12.5, bold=True, color=WARN, first=True, space_after=4)
+    para(tf, "C8 卡在显存而非调度：8 份完整请求态（每份 KV 72 MiB + GDN 443 MiB）需 4.1 GiB，"
+             "超出 2.36 GiB 的 admission 预算。共享 GDN scratch 后每份可降至约 295 MiB、"
+             "算术上可入场，但该改造未实现，因此不声称 C8。调度器、admission 与批式 kernel "
+             "均已按并发数参数化。",
+         size=11.5, color=MUTED, space_after=0, line=1.3)
+    footer(s, "回滚 = 不设 APXINF_Q35_MAX_CONCURRENCY（或 =1）即恢复精确的冻结单请求 runtime；"
+              "并发同批 32 请求全部 200，无 503")
+
     # ───────────────────────── 12. Reproduce ─────────────────────────
     s = blank(prs)
     y = header(s, "可复现性与提交材料", "REPRODUCIBILITY")
 
-    rect(s, Inches(0.7), y, Inches(11.9), Inches(1.82), fill=RGBColor(0x1A, 0x1D, 0x24))
-    tf = textbox(s, Inches(1.0), y + Inches(0.14), Inches(11.3), Inches(1.55))
+    rect(s, Inches(0.7), y, Inches(11.9), Inches(2.02), fill=RGBColor(0x1A, 0x1D, 0x24))
+    tf = textbox(s, Inches(1.0), y + Inches(0.14), Inches(11.3), Inches(1.78))
     for i, line in enumerate([
         "# 提交 commit（验收以此为准）",
-        "489f77adeeca08ae798df704ffe625f97f2bfca6    branch: integrate/member2",
+        "06993a2d2642c6f7177b57493b797d5d537e4d64    branch: integrate/member2",
         "",
         "python3 benchmarks/qwen38_4090/evaluation/test.py check      # → assignment checks passed",
         "cargo build --release --features cuda-no-nvtx --locked --bin apxinf",
         "target/release/apxinf serve --model <ckpt> --revision 63768c10... --gpu-uuid GPU-343bc895...",
         "APXINF_ENABLE_MULTIMODAL=1 target/release/apxinf serve ...   # 多模态配置（可选，单开关）",
+        "APXINF_Q35_MAX_CONCURRENCY=4 ... serve ... --queue-capacity 4  # C4 并发配置（可选，单开关）",
     ]):
         color = RGBColor(0x7E, 0xC8, 0xFF) if line.startswith("#") else RGBColor(0xE6, 0xEA, 0xF0)
         para(tf, line, size=11.5, color=color, font=MONO, first=(i == 0), space_after=2)
 
-    y += Inches(2.0)
+    y += Inches(2.2)
     tf = textbox(s, Inches(0.7), y, Inches(5.8), Inches(0.3))
     para(tf, "提交材料对应关系", size=13, bold=True, color=ACCENT, first=True)
     bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
@@ -622,8 +672,8 @@ def build() -> None:
     bullets(s, Inches(6.9), y + Inches(0.38), Inches(5.7), [
         ("每项优化独立可关 ", "APXINF_Q35_W4_PREFILL_GEMM / W4_PACKED_GEMV / "
                            "BATCHED_SDPA / SCRATCH_POOL / PREFILL_CHUNK / ROWWISE_SOFTMAX"),
-        ("多模态单开关 ", "APXINF_ENABLE_MULTIMODAL 不设时 vision 塔不加载，"
-                       "行为即纯文本提交件"),
+        ("bonus 均单开关 ", "APXINF_ENABLE_MULTIMODAL 与 APXINF_Q35_MAX_CONCURRENCY "
+                         "都不设时，行为即纯文本单请求提交件"),
         ("被拒候选保留在树中 ", "默认关闭并附回归测试，作为负结果证据"),
         ("回滚点 ", "47ec280d2f88e8daf87750c0957e596e3a5390c1（集成前 HEAD）"),
         ("清洁性 ", "cargo fmt --check、cargo check --workspace --locked、git diff --check 全绿"),
@@ -639,7 +689,7 @@ def build() -> None:
 
     y += Inches(0.62)
     metric(s, Inches(0.7), y, Inches(3.4), "95%", "程仁龙（本人）",
-           "模型 / kernel / 服务 / 性能 / 多模态", ACCENT)
+           "模型 / kernel / 服务 / 性能 / 双 bonus", ACCENT)
     metric(s, Inches(4.35), y, Inches(3.4), "5%", "王天民",
            "离线 benchmark 脚手架", MUTED)
 
@@ -662,8 +712,8 @@ def build() -> None:
         ("服务与协议", "HTTP / SSE surface、七项负控、admission、断连取消与故障恢复，"
                      "/v1/chat/completions 图文入口"),
         ("正确性证据", "离线 oracle（文本 + vision）、hidden 代理集、逐层对拍与位相等断言"),
-        ("性能工程与多模态", "十七次配对实验、显存账本、vision 塔与 27 块 CUDA 移植、"
-                          "REPORT.md、最终集成与提交"),
+        ("性能工程与双 bonus", "十七次配对实验、显存账本、vision 塔 CUDA 移植、"
+                            "C4 批式调度与批式 kernel、REPORT.md、最终集成与提交"),
     ]
     for i, (t, d) in enumerate(quad):
         cx = Inches(0.7) + Inches(6.05) * (i % 2)
@@ -707,7 +757,7 @@ def build() -> None:
         para(tf, v, size=12, color=WHITE, first=True, line=1.3)
 
     tf = textbox(s, Inches(1.1), Inches(6.5), Inches(11.1), Inches(0.4))
-    para(tf, "commit 489f77adeeca08ae798df704ffe625f97f2bfca6 · branch integrate/member2",
+    para(tf, "commit 06993a2d2642c6f7177b57493b797d5d537e4d64 · branch integrate/member2",
          size=11, color=RGBColor(0x8F, 0xC2, 0xF0), font=MONO, first=True)
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
