@@ -1,9 +1,11 @@
 # ApxInf Qwen3.8-27B Single-GPU Inference Report
 
 Status: text-eligibility gates met; single-request performance optimized
-(TTFT up to ~48x and TPOT ~2x over the eligibility baseline); multimodal
-bonus path implemented, verified end to end and delivered behind a single
-opt-in switch. See "Submission Identity" for the authoritative commit.
+(TTFT up to ~48x and TPOT ~2x over the eligibility baseline); two bonus
+paths delivered, each behind its own single opt-in switch — multimodal
+(vision tower + `/v1/chat/completions`) and C4 concurrent serving (all
+official calibration validity gates passed). See "Submission Identity" for
+the authoritative commit.
 
 Conventions used throughout:
 
@@ -21,8 +23,13 @@ Conventions used throughout:
 ## Submission Identity
 
 - Branch: `integrate/member2` (remote `origin`).
-- Submitted commit SHA: recorded by `git rev-parse HEAD` at submission time;
-  this report and every measurement below describe that tree.
+- Implementation commit (all code and planning documents, final):
+  `06993a2d2642c6f7177b57493b797d5d537e4d64` — "feat(qwen35): add C4
+  concurrent batched serving behind a single switch". Every measurement in
+  this report describes that tree; acceptance references this SHA. This
+  report file is committed immediately on top of it and changes no code.
+- Submitted HEAD SHA: recorded by `git rev-parse HEAD` at submission time
+  (the report-only commit above the implementation commit).
 - Rollback point (pre-integration HEAD):
   `47ec280d2f88e8daf87750c0957e596e3a5390c1`.
 - Previous integration checkpoint:
@@ -90,6 +97,7 @@ execution phase whose behaviour changed.
 | 8 | Causal softmax: every thread scanning the full row -> row-cooperative block reduction | attention prefill | A/B 17 |
 | 9 | GDN status checks: kept eager per-op — the deferred variant measured zero gain and was rejected, i.e. the design deliberately did not change | decode / prefill | A/B 3 |
 | 10 | Multimodal: absent route (non-compliant 404) -> contract fail-closed 400 by default; full vision path + `POST /v1/chat/completions` behind `APXINF_ENABLE_MULTIMODAL=1` | new chat entry + prefill embedding scatter | "Multimodal Bonus Implementation" |
+| 11 | Multi-request C4: batched protocol runtime behind `APXINF_Q35_MAX_CONCURRENCY` — one batched decode step per round, two-phase delivery, prefix cache + recycled-session pool; the default single-request path is unchanged | new batch scheduler + batched decode | "Multi-Request Bonus: C4 Concurrent Serving" |
 
 Changes that were designed, measured and *not* adopted are part of the same
 record: see "Failed experiments" below.
@@ -191,8 +199,10 @@ Consequences, stated plainly:
    63768c10df38c0395e12ef49edac1bd539eaeeea --gpu-uuid
    GPU-343bc895-b011-22fa-4449-97207aa2bdec --bind 127.0.0.1:18080
    --max-model-len 32768 --queue-capacity 1`. Prefix with
-   `APXINF_ENABLE_MULTIMODAL=1` for the multimodal configuration; serialize
-   real-GPU jobs behind the global GPU-job lock.
+   `APXINF_ENABLE_MULTIMODAL=1` for the multimodal configuration, or
+   `APXINF_Q35_MAX_CONCURRENCY=4` plus `--queue-capacity 4` for the C4
+   concurrent configuration; serialize real-GPU jobs behind the global
+   GPU-job lock.
 3. Gates: the frozen protocol suite (`apxinf-protocol.py`, expected 12/12),
    the six public functional cases, and the proxy hidden suite
    (`apxinf-proxy-hidden-run.py`, expected >= 11/12, non-official).
@@ -324,8 +334,11 @@ and no change was accepted on kernel-level numbers alone.
    than resampled; the vision forward adds ~0.4 s per image with a ~30 ms
    host-memory round-trip in the QKV split — functional, not tuned.
 5. Long-context bonus is capped by VRAM (65536 needs 4923 MiB against
-   4606 MiB free; 131072 is impossible even with INT8 KV), and C4/C8 needs a
-   continuous-batching scheduler that does not exist in this tree.
+   4606 MiB free; 131072 is impossible even with INT8 KV). C4 is delivered;
+   C8 is blocked on memory, not scheduling — 8 full request states need
+   4.1 GiB against the 2.36 GiB admission budget; the shared-GDN-scratch
+   refactor that would fit it (~295 MiB per state) is quantified but not
+   implemented, so C8 is not claimed.
 
 An earlier blocker — no completed long-prompt service request — is resolved
 and kept only as history: the seven-cell campaigns completed every prompt
@@ -366,6 +379,9 @@ unreachable in production dispatch.
   `APXINF_ENABLE_MULTIMODAL` the vision tower is not loaded, the prefill
   chunk default stays 512, image requests fail closed with the contract 400,
   and the service is the unchanged text-only submission.
+- The C4 batched runtime is likewise a single opt-in switch: without
+  `APXINF_Q35_MAX_CONCURRENCY` (or with `=1`) the service is the exact
+  frozen single-request runtime.
 - Whole-tree rollback point (pre-integration HEAD):
   `47ec280d2f88e8daf87750c0957e596e3a5390c1`.
 
@@ -1647,7 +1663,8 @@ pool released on demand (which would free 460 MiB, leaving ~143 MiB of slack);
 C4/C8 is the opposite: the dominant cost is the length-independent 443 MiB GDN
 state per request, so 4 concurrent requests need ~2060 MiB and 8 need
 ~4120 MiB — both fit — but continuous batching (`scheduler.rs`) does not exist
-yet. Multimodal costs ~880 MiB resident for the vision tower, leaving
+yet. *(C4 was subsequently delivered — see "Multi-Request Bonus: C4
+Concurrent Serving".)* Multimodal costs ~880 MiB resident for the vision tower, leaving
 3726 MiB, which still covers 32K single-request serving.
 
 Scoring structure matters for the choice and is recorded plainly: the
@@ -1875,6 +1892,186 @@ contract request shape is accepted (one PNG image_url + one text part,
 temperature 0, `enable_thinking=false`, stream=false); (3) the vision
 forward adds ~0.4 s and the QKV column split currently round-trips through
 host memory (~30 ms per image) — functional, not tuned.
+
+
+## Multi-Request Bonus: C4 Concurrent Serving (2026-08-26 night session)
+
+Goal: pass the `multi-c4-text-perf-1024` cell (4 concurrent closed-loop
+clients, 1024-token prompt, 128 completion tokens, 32 requests total) without
+regressing the frozen single-request configuration. C8 was explored and its
+blocker quantified (see below).
+
+### Architecture
+
+A batched protocol runtime (`src/server/qwen35_batch.rs`), enabled only when
+`APXINF_Q35_MAX_CONCURRENCY > 1`; the default single-request path is
+untouched (same `ProtocolRuntime`, same kernels, no behavior change — the
+frozen configuration does not set the variable).
+
+- One batch worker thread owns the model; HTTP admissions post `BatchJob`s
+  through an MPSC queue guarded by `RuntimeAdmission` (permits = 4,
+  per-request memory sizer instead of the single-slot budget).
+- Each round: admit up to 4 slots -> one batched decode step for all slots ->
+  deliver one token per slot. Retired slots release their admission permits
+  BEFORE any final token is sent (two-phase delivery; see "Lessons").
+- Prefix cache: the first request for a prompt runs the normal prefill and
+  caches a pristine fork as a template; identical prompts (the evaluator's
+  multi cells use one shared prompt per cell) fork/refill from it in ~2 ms.
+- Recycled-session pool (depth 3): retired sessions keep their ~0.52 GiB of
+  device allocations and are refilled in place from the template
+  (stream-ordered copies), avoiding the ~320 cudaMallocs (~330 ms measured)
+  of a cold fork. Pool + template are dropped whenever a larger-than-template
+  request arrives (8K/16K cells need the head-room; measured OOM otherwise).
+
+### Batched decode numerics
+
+Per-request math is bit-identical to the serial path where at all feasible:
+
+- New CUDA kernels `qwen35_gdn_conv_batch_bf16_kernel` and
+  `qwen35_gdn_recurrent_batch_bf16_f32_kernel`: one `blockIdx.y` per request
+  with per-request state pointer arrays; the per-channel/per-head bodies are
+  copied verbatim from the single-request kernels (same thread mapping, same
+  accumulation order).
+- New `rope_partial_positions_bf16_kernel`: partial RoPE with one position
+  per row (same per-row math as `rope_partial_batched`).
+- QK RMSNorm, gated RMSNorm, sigmoid gate: row-independent kernels applied to
+  the whole batch (bit-identical per row).
+- W4 packed projections batch across rows (one block per (row, out) pair —
+  bit-identical per row, established earlier).
+- Two accepted cuBLAS reassociations (documented trade, affects only
+  exactly-tied argmax logits): the batched LM head GEMM ([M, vocab] instead
+  of M GEMVs), and GDN in_proj_a/in_proj_b are per-request GEMVs that are
+  stacked (still bit-identical); the BF16 out_proj/attention out_proj remain
+  per-request GEMVs.
+- Bit-equality regression: `real_layers_batched_decode_bit_matches_serial`
+  (ignored test, GPU0) loads real checkpoint layers, runs 3 requests batched
+  vs serial for multiple steps, and asserts byte-identical outputs and
+  states. Re-run after every batching change: passed at every step.
+
+### Measured progression (closed loop, 4 clients, 1024/128, loopback)
+
+| stage | steady TPOT | notes |
+|---|---|---|
+| naive per-request loop in batch step | ~3300 ms/round | 2000+ micro-ops, sync memcpys, per-op allocs |
+| deferred status + zero-copy row views + async stacks | ~150 ms/round (batch=3) | but only 3 of 4 slots ever active |
+| + two-phase delivery (permit release before send) | 503s eliminated (32/32 OK) | root cause: clients resubmit within the 17 us retirement window |
+| + session fork for prefix cache | TTFT 6.5 s -> 1.7 s (first wave) / 0.05 s (steady) | template was silently never cached before the rollback-flag fix |
+| + batched GDN/rope/gate kernels + batched LM head | TPOT 186-206 ms | GDN stage 140 ms -> ~95 ms (batch=4) |
+| + recycle pool (fork -> refill ~2 ms) | p95 TPOT hovers at the 201.5 ms limit | residual: one ~330 ms fork + one ~20 ms dispose per wave |
+
+Single-request baseline for the validity thresholds (same submission):
+TTFT 1.905 s (limit 1.5x = 2.86 s), TPOT 67.2 ms (limit 3x = 201.5 ms).
+
+### Where the remaining variance comes from
+
+Batch-step timing shows p50 = 178 ms with 2-3 outlier steps (600-1400 ms)
+per template turnover, clustered around the once-per-wave cold fork
+(320 cudaMallocs) and pool-overflow dispose (320 cudaFrees). Removing the
+last per-wave malloc/free entirely needs a 4-deep pool, which is 29 MiB over
+the measured free VRAM (9 x 0.52 GiB resident states + weights 19.5 GiB);
+the structural fix is sharing the GDN scratch/backup buffers across sessions
+(~148 MiB per session, the batch worker serializes their use), which is also
+the enabler for C8 (8 x lean states would fit where 8 x full states cannot).
+That refactor is the identified next step, not attempted tonight.
+
+### C8 assessment
+
+Blocked on memory, not on scheduling: the scheduler, admission sizer, and
+batched kernels all take the concurrency from `APXINF_Q35_MAX_CONCURRENCY`.
+8 full request states (KV 72 MiB + GDN 443 MiB each) = 4.1 GiB against
+2.36 GiB of admission budget (and the physical margin above). With shared
+GDN scratch/backup (states drop to ~295 MiB) plus the existing pool-yield
+logic, C8 admission fits arithmetically; TPOT would additionally need the
+per-request flash-decode/KV-append stages batched (the remaining serial
+segment, ~50 ms at batch=4). Not claimable without implementation.
+
+### Lessons recorded
+
+- "Pending rollback" flags on GDN states mean "last commit is revocable"
+  (normal), not "state is dirty": misreading them made every template fork
+  fail silently and cost an hour (every request re-prefilled, TTFT 6.5 s).
+  Cache-skip paths now log loudly.
+- Two-phase delivery matters at loopback speeds: all 503s landed in the
+  17 us window between two slot retirements, because a client's next request
+  raced the not-yet-released permits of sibling slots.
+- Synchronous cudaMemcpy/cudaMalloc in per-request paths dominate batched
+  decode: a state fork was 330 ms of which ~260 ms was 320 serial
+  stream fences; async copies + one final synchronize (later: none, stream
+  order suffices) fixed it.
+- cargo test parallel threads on one GPU produce mass spurious failures
+  (basic operator tests "failing" in 4.7 s); serial re-run restored the
+  102 passed + 2 pre-existing fp8 baseline.
+
+
+### C4 final result (official evaluator, calibration profile, run 20260826-204907-apxinf)
+
+All validity gates pass with margin:
+
+| metric | value | threshold |
+|---|---|---|
+| success_rate | 1.0 | = 1.0 |
+| correctness_rate | 1.0 | = 1.0 |
+| jain_fairness_index | 0.9993 | >= 0.95 |
+| p95_ttft_s | 1.789 | <= 2.496 (1.5x single 1.664) |
+| p95_tpot_s | 0.1739 | <= 0.1869 (3x single 62.3 ms) |
+| goodput | 23.53 tok/s | scored metric |
+| no_fallback / healthy_after | true | required |
+
+Same submission re-verified the single-request cells (no regression, in fact
+slightly faster than the frozen baseline's 66.5-67.3 ms TPOT band):
+1K 62.3 ms / 2K 62.0 / 4K 62.3 / 8K 62.7 / 16K 68.1 ms TPOT; protocol 12/12;
+public functional 6/6. Trajectory capture remains DEBUG-ONLY (no
+platform-approved `--trajectory-reference`; unverified flag unchanged).
+
+The two decisive final fixes:
+
+1. `decode_step_batch` falls back to the serial step for batch=1 (the
+   batched plumbing cost ~10% TPOT on the 16K cell: 74.5 -> 68.1 ms).
+2. Session clones allocate through the stream-ordered pool
+   (`cudaMallocAsync`/`cudaFreeAsync`, release threshold pinned to keep pool
+   pages): a fork went from ~330 ms (320 synchronous cudaMallocs, each an
+   implicit device synchronize) to single-digit ms submitted in stream
+   order, and retirements free in stream order too. This removed both the
+   first-wave TTFT penalty (pre-warm no longer needed and was removed) and
+   the wave-turnover TPOT spikes: closed-loop waves measure 166.7-173.9 ms
+   TPOT (previously 186-216 with outliers).
+
+Environment note recorded for fairness of local numbers: two isolated
+batch-step outliers (1.2-1.4 s, GDN and attention inflated proportionally,
+instant recovery, no correlated service event, mid-wave) were observed once
+on this shared host; they match external GPU preemption, not a service
+defect. The final evaluator run shows no such outlier.
+
+### Default-configuration regression after all C4 changes
+
+- Protocol gate 12/12 (sha256 `49f8b0fc...`), evidence
+  `apxinf-evidence/c4-regression/`.
+- A/B probe on the default single-request service: TTFT median 1.870 s,
+  TPOT median 66.3 ms — inside the frozen baseline band (1.63-1.9 s / 66.5 ms).
+- Frozen 128-token output sha256 `20d981cb...` is byte-identical to the
+  accepted frozen configuration's output (same sha as the accepted
+  `ab-chunk512` / `ab-rowwise-softmax` records; the probe's embedded
+  constant predates those accepted optimizations — see "Frozen 128-Token
+  Oracle Audit").
+- CPU suites: apxinf bin tests pass; apxinf-model lib pass; apxinf-cuda lib
+  102 passed + the 2 pre-existing environmental fp8 failures (baseline
+  unchanged). Batched-vs-serial bit-equality test re-passed after the final
+  build.
+
+### C4 service command (for the record)
+
+    setsid nohup bash -c 'exec flock -n <gpu-job-lock> env \
+      CUDA_VISIBLE_DEVICES=GPU-343bc895-b011-22fa-4449-97207aa2bdec \
+      APXINF_Q35_MAX_CONCURRENCY=4 APXINF_Q35_DEFERRED_STATUS=1 \
+      target/release/apxinf serve --model <model-dir> \
+      --revision 63768c10df38c0395e12ef49edac1bd539eaeeea \
+      --gpu-uuid GPU-343bc895-b011-22fa-4449-97207aa2bdec \
+      --bind 127.0.0.1:18080 --max-model-len 32768 --queue-capacity 4' \
+      > <log-file> 2>&1 & disown
+
+Rollback: unset `APXINF_Q35_MAX_CONCURRENCY` (or set to 1) restores the
+exact frozen single-request runtime; `APXINF_Q35_DEFERRED_STATUS` remains
+default-off there. No default-path behavior changed.
 
 # Appendix: Chronological Session Records
 
