@@ -1,0 +1,61 @@
+{
+ "case_count": 6,
+ "passed_total": 6,
+ "results": [
+  {
+   "elapsed_s": 21.1,
+   "expected": "KEY-P10-767211",
+   "id": "text-niah-1024-p10",
+   "passed": true,
+   "status": 200,
+   "text": "KEY-P10-767211",
+   "tokens": 12
+  },
+  {
+   "elapsed_s": 21.0,
+   "expected": "KEY-P50-615408",
+   "id": "text-niah-1024-p50",
+   "passed": true,
+   "status": 200,
+   "text": "KEY-P50-615408",
+   "tokens": 12
+  },
+  {
+   "elapsed_s": 23.7,
+   "expected": "KEY-P90-162970",
+   "id": "text-niah-1024-p90",
+   "passed": true,
+   "status": 200,
+   "text": "KEY-P90-162970",
+   "tokens": 12
+  },
+  {
+   "elapsed_s": 213.9,
+   "expected": "MH-521240",
+   "id": "longdoc-multihop-8192",
+   "passed": true,
+   "status": 200,
+   "text": "MH-521240",
+   "tokens": 9
+  },
+  {
+   "elapsed_s": 215.8,
+   "expected": "REV-551853",
+   "id": "longdoc-revision-8192",
+   "passed": true,
+   "status": 200,
+   "text": "REV-551853",
+   "tokens": 9
+  },
+  {
+   "elapsed_s": 212.1,
+   "expected": "22",
+   "id": "longdoc-aggregate-8192",
+   "passed": true,
+   "status": 200,
+   "text": "22",
+   "tokens": 3
+  }
+ ],
+ "schema": "apxinf.public-functional.v1"
+}

@@ -1,0 +1,16 @@
+proxy-retrieval-1024-early   passed=True tokens=11 t=79.5s
+proxy-retrieval-4096-mid     passed=True tokens=11 t=323.3s
+proxy-retrieval-8192-late    passed=True tokens=11 t=680.4s
+proxy-retrieval-16384-mid    passed=True tokens=12 t=1638.4s
+proxy-distractor-2048        passed=True tokens=10 t=161.1s
+proxy-distractor-8192        passed=True tokens=10 t=679.9s
+proxy-multihop-4096          passed=True tokens=10 t=322.2s
+proxy-multihop-8192          passed=True tokens=10 t=679.9s
+proxy-revision-2048          passed=True tokens=9 t=158.2s
+proxy-revision-8192          passed=True tokens=9 t=680.2s
+proxy-aggregate-1024         passed=True tokens=3 t=78.4s
+proxy-aggregate-8192         passed=False tokens=4 t=676.9s
+   expected: "223"
+   actual  : "164"
+
+proxy hidden 11/12 passed -> /tmp/apxinf-evidence/proxy-hidden/proxy-hidden.json

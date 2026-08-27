@@ -1,0 +1,820 @@
+# test.py check — worktree integrate/member2
+# date: 2026-08-26T22:32:10+08:00
+# cwd: /root/.config/superpowers/worktrees/ApxInf/integrate-member2
+# cmd: python3 benchmarks/qwen38_4090/evaluation/test.py check
+
++ /usr/bin/python3 /root/.config/superpowers/worktrees/ApxInf/integrate-member2/benchmarks/qwen38_4090/evaluation/fetch_public_corpus.py --help
+usage: fetch_public_corpus.py [-h] [--contract CONTRACT] [--output OUTPUT]
+
+Fetch and verify the public long-document corpus declared by the contract.
+
+options:
+  -h, --help           show this help message and exit
+  --contract CONTRACT
+  --output OUTPUT
++ /usr/bin/python3 /root/.config/superpowers/worktrees/ApxInf/integrate-member2/benchmarks/qwen38_4090/evaluation/generate_evaluation_cases.py --help
+usage: generate_evaluation_cases.py [-h] [--contract CONTRACT] --model-dir
+                                    MODEL_DIR [--corpus CORPUS] --output-dir
+                                    OUTPUT_DIR
+                                    [--suite {public,context,qualitative}]
+                                    [--lengths LENGTHS] [--include-prompt]
+
+Generate exact-token public, context, and qualitative evaluation cases. The
+contract is the workload source of truth. The generated JSONL contains
+pretokenized input IDs so every backend receives identical model input.
+
+options:
+  -h, --help            show this help message and exit
+  --contract CONTRACT
+  --model-dir MODEL_DIR
+  --corpus CORPUS
+  --output-dir OUTPUT_DIR
+  --suite {public,context,qualitative}
+  --lengths LENGTHS
+  --include-prompt
++ /usr/bin/python3 /root/.config/superpowers/worktrees/ApxInf/integrate-member2/benchmarks/qwen38_4090/evaluation/run_evaluation.py --help
+usage: run_evaluation.py [-h] [--contract CONTRACT] --dataset DATASET
+                         [--hidden-dataset HIDDEN_DATASET]
+                         [--context-dataset CONTEXT_DATASET] --model-dir
+                         MODEL_DIR [--base-url BASE_URL]
+                         [--api-mode {evaluation,vllm-completions}]
+                         [--served-model-name SERVED_MODEL_NAME]
+                         [--parallel-requests-capability PARALLEL_REQUESTS_CAPABILITY]
+                         --implementation-name IMPLEMENTATION_NAME
+                         --implementation-revision IMPLEMENTATION_REVISION
+                         --backend BACKEND
+                         [--profile {public_calibration,midterm_leaderboard}]
+                         [--trajectory-reference TRAJECTORY_REFERENCE]
+                         [--capture-trajectory-reference CAPTURE_TRAJECTORY_REFERENCE]
+                         [--multimodal-public-report MULTIMODAL_PUBLIC_REPORT]
+                         [--multimodal-hidden-report MULTIMODAL_HIDDEN_REPORT]
+                         [--multimodal-contract MULTIMODAL_CONTRACT]
+                         [--run-context] [--run-multi] [--warmups WARMUPS]
+                         [--repeats REPEATS] [--timeout TIMEOUT]
+                         [--output-dir OUTPUT_DIR] [--run-id RUN_ID]
+                         [--skip-protocol]
+
+Run the canonical Qwen3.8-27B evaluator and emit a submission artifact.
+Official runs use client-observed, no-profiler timing. This program preserves
+one raw row per request and derives every aggregate in submission.json from
+those rows; submission fields are never accepted as command-line input.
+
+options:
+  -h, --help            show this help message and exit
+  --contract CONTRACT
+  --dataset DATASET
+  --hidden-dataset HIDDEN_DATASET
+  --context-dataset CONTEXT_DATASET
+  --model-dir MODEL_DIR
+  --base-url BASE_URL
+  --api-mode {evaluation,vllm-completions}
+  --served-model-name SERVED_MODEL_NAME
+  --parallel-requests-capability PARALLEL_REQUESTS_CAPABILITY
+                        Platform-declared vLLM adapter capacity; candidate
+                        services must advertise this in /health
+  --implementation-name IMPLEMENTATION_NAME
+  --implementation-revision IMPLEMENTATION_REVISION
+  --backend BACKEND
+  --profile {public_calibration,midterm_leaderboard}
+  --trajectory-reference TRAJECTORY_REFERENCE
+  --capture-trajectory-reference CAPTURE_TRAJECTORY_REFERENCE
+  --multimodal-public-report MULTIMODAL_PUBLIC_REPORT
+  --multimodal-hidden-report MULTIMODAL_HIDDEN_REPORT
+  --multimodal-contract MULTIMODAL_CONTRACT
+  --run-context
+  --run-multi
+  --warmups WARMUPS
+  --repeats REPEATS
+  --timeout TIMEOUT
+  --output-dir OUTPUT_DIR
+  --run-id RUN_ID       Stable artifact directory name; defaults to UTC
+                        timestamp plus backend
+  --skip-protocol
++ /usr/bin/python3 /root/.config/superpowers/worktrees/ApxInf/integrate-member2/benchmarks/qwen38_4090/evaluation/score_multimodal.py --help
+usage: score_multimodal.py [-h] --public-report PUBLIC_REPORT
+                           [--hidden-report HIDDEN_REPORT]
+                           [--leaderboard-contract LEADERBOARD_CONTRACT]
+                           [--multimodal-contract MULTIMODAL_CONTRACT]
+                           [--output OUTPUT]
+
+Score the frozen multimodal bonus and assign capability badges.
+
+options:
+  -h, --help            show this help message and exit
+  --public-report PUBLIC_REPORT
+  --hidden-report HIDDEN_REPORT
+  --leaderboard-contract LEADERBOARD_CONTRACT
+  --multimodal-contract MULTIMODAL_CONTRACT
+  --output OUTPUT
++ /usr/bin/python3 /root/.config/superpowers/worktrees/ApxInf/integrate-member2/benchmarks/qwen38_4090/evaluation/score_submission.py --help
+usage: score_submission.py [-h] [--contract CONTRACT] --submission SUBMISSION
+                           [--control-submission CONTROL_SUBMISSION]
+                           [--profile {public_calibration,midterm_leaderboard}]
+                           [--require-official-control] [--output OUTPUT]
+
+Score a Qwen3.8-27B cohort using the frozen RTX 4090 course contract.
+
+options:
+  -h, --help            show this help message and exit
+  --contract CONTRACT
+  --submission SUBMISSION
+                        Candidate submission; repeat for every PR in the
+                        cohort.
+  --control-submission CONTROL_SUBMISSION
+                        Platform control such as vLLM; repeat when needed.
+  --profile {public_calibration,midterm_leaderboard}
+  --require-official-control
+                        Fail unless an eligible vLLM control is present.
+  --output OUTPUT
++ cargo check --workspace --locked
+   Compiling apxinf-core v0.1.0 (/root/.config/superpowers/worktrees/ApxInf/integrate-member2/crates/apxinf-core)
+   Compiling apxinf-cuda v0.1.0 (/root/.config/superpowers/worktrees/ApxInf/integrate-member2/crates/apxinf-cuda)
+warning: field `max_seq_len` is never read
+  --> crates/apxinf-core/src/kv_cache.rs:38:5
+   |
+34 | pub struct CpuKVCache {
+   |            ---------- field in this struct
+...
+38 |     max_seq_len: usize,
+   |     ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `apxinf-core` (lib) generated 1 warning
+    Checking apxinf-loader v0.1.0 (/root/.config/superpowers/worktrees/ApxInf/integrate-member2/crates/apxinf-loader)
+    Checking apxinf-tokenizer v0.1.0 (/root/.config/superpowers/worktrees/ApxInf/integrate-member2/crates/apxinf-tokenizer)
+    Checking apxinf-model v0.1.0 (/root/.config/superpowers/worktrees/ApxInf/integrate-member2/crates/apxinf-model)
+warning: field `layer_types` is never read
+   --> crates/apxinf-model/src/qwen35/model.rs:193:5
+    |
+192 | pub struct Qwen35RequestState {
+    |            ------------------ field in this struct
+193 |     layer_types: Vec<LayerType>,
+    |     ^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `prefill_ranges` is never used
+  --> crates/apxinf-model/src/qwen35/runtime.rs:26:4
+   |
+26 | fn prefill_ranges(prompt_tokens: usize) -> impl Iterator<Item = std::ops::Range<usize>> {
+   |    ^^^^^^^^^^^^^^
+
+warning: function `request_capacity` is never used
+  --> crates/apxinf-model/src/qwen35/runtime.rs:33:4
+   |
+33 | fn request_capacity(
+   |    ^^^^^^^^^^^^^^^^
+
+warning: `apxinf-model` (lib) generated 3 warnings
+    Checking apxinf-py v0.1.0 (/root/.config/superpowers/worktrees/ApxInf/integrate-member2/crates/apxinf-py)
+    Checking apxinf v0.1.0 (/root/.config/superpowers/worktrees/ApxInf/integrate-member2)
+warning: unused import: `std::net::TcpListener`
+ --> src/main.rs:4:5
+  |
+4 | use std::net::TcpListener;
+  |     ^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::sync::Arc`
+ --> src/main.rs:6:5
+  |
+6 | use std::sync::Arc;
+  |     ^^^^^^^^^^^^^^
+
+warning: struct `ConformanceReport` is never constructed
+ --> src/bin/../server/conformance.rs:8:12
+  |
+8 | pub struct ConformanceReport {
+  |            ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `probe_protocol_runtime` is never used
+  --> src/bin/../server/conformance.rs:18:8
+   |
+18 | pub fn probe_protocol_runtime<R: ProtocolRuntime>(
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: trait `Qwen35StepSession` is never used
+  --> src/bin/../server/qwen35_runtime.rs:19:11
+   |
+19 | pub trait Qwen35StepSession: Send {
+   |           ^^^^^^^^^^^^^^^^^
+
+warning: trait `Qwen35StepExecutor` is never used
+  --> src/bin/../server/qwen35_runtime.rs:24:11
+   |
+24 | pub trait Qwen35StepExecutor: Send + Sync + 'static {
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: enum `SessionCommand` is never used
+  --> src/bin/../server/qwen35_runtime.rs:74:6
+   |
+74 | enum SessionCommand {
+   |      ^^^^^^^^^^^^^^
+
+warning: struct `WorkerJob` is never constructed
+  --> src/bin/../server/qwen35_runtime.rs:79:8
+   |
+79 | struct WorkerJob {
+   |        ^^^^^^^^^
+
+warning: struct `OpenedSession` is never constructed
+  --> src/bin/../server/qwen35_runtime.rs:85:8
+   |
+85 | struct OpenedSession {
+   |        ^^^^^^^^^^^^^
+
+warning: struct `Qwen35ProtocolRuntime` is never constructed
+  --> src/bin/../server/qwen35_runtime.rs:89:12
+   |
+89 | pub struct Qwen35ProtocolRuntime {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `active_requests` are never used
+   --> src/bin/../server/qwen35_runtime.rs:98:12
+    |
+ 97 | impl Qwen35ProtocolRuntime {
+    | -------------------------- associated items in this implementation
+ 98 |     pub fn new(
+    |            ^^^
+...
+123 |     pub fn active_requests(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^
+
+warning: function `worker_loop` is never used
+   --> src/bin/../server/qwen35_runtime.rs:183:4
+    |
+183 | fn worker_loop(
+    |    ^^^^^^^^^^^
+
+warning: function `run_session` is never used
+   --> src/bin/../server/qwen35_runtime.rs:220:4
+    |
+220 | fn run_session(
+    |    ^^^^^^^^^^^
+
+warning: struct `Qwen35ProtocolTokenStream` is never constructed
+   --> src/bin/../server/qwen35_runtime.rs:253:8
+    |
+253 | struct Qwen35ProtocolTokenStream {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `cancel_worker` is never used
+   --> src/bin/../server/qwen35_runtime.rs:260:8
+    |
+259 | impl Qwen35ProtocolTokenStream {
+    | ------------------------------ method in this implementation
+260 |     fn cancel_worker(&self) {
+    |        ^^^^^^^^^^^^^
+
+warning: function `apply_eos` is never used
+ --> src/bin/../server/response.rs:7:8
+  |
+7 | pub fn apply_eos(output_ids: Vec<u32>, ignore_eos: bool) -> Vec<u32> {
+  |        ^^^^^^^^^
+
+warning: function `sse_frames` is never used
+  --> src/bin/../server/response.rs:49:8
+   |
+49 | pub fn sse_frames(request_id: &str, prompt_tokens: usize, output_ids: &[u32]) -> Vec<Vec<u8>> {
+   |        ^^^^^^^^^^
+
+warning: associated items `new_unready`, `health_json`, `warmup`, `mark_ready`, `handle_non_stream`, and `start_stream` are never used
+   --> src/bin/../server/service.rs:177:12
+    |
+172 | impl<R: ProtocolRuntime> ProtocolService<R> {
+    | ------------------------------------------- associated items in this implementation
+...
+177 |     pub fn new_unready(runtime: R, stub: bool) -> Self {
+    |            ^^^^^^^^^^^
+...
+197 |     pub fn health_json(&self) -> Vec<u8> {
+    |            ^^^^^^^^^^^
+...
+238 |     pub fn warmup(&self) -> Result<(), RuntimeError> {
+    |            ^^^^^^
+...
+268 |     pub fn mark_ready(&self) {
+    |            ^^^^^^^^^^
+...
+272 |     pub fn handle_non_stream(&self, raw: &[u8]) -> HttpResponse {
+    |            ^^^^^^^^^^^^^^^^^
+...
+321 |     pub fn start_stream(&self, raw: &[u8]) -> Result<SseGeneration, HttpResponse> {
+    |            ^^^^^^^^^^^^
+
+warning: `apxinf` (bin "apxinf_protocol_stub") generated 16 warnings
+warning: field `bind` is never read
+  --> src/main.rs:21:5
+   |
+17 | struct ServeArgs {
+   |        --------- field in this struct
+...
+21 |     bind: std::net::SocketAddr,
+   |     ^^^^
+   |
+   = note: `ServeArgs` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: struct `ConformanceReport` is never constructed
+ --> src/server/conformance.rs:8:12
+  |
+8 | pub struct ConformanceReport {
+  |            ^^^^^^^^^^^^^^^^^
+
+warning: function `probe_protocol_runtime` is never used
+  --> src/server/conformance.rs:18:8
+   |
+18 | pub fn probe_protocol_runtime<R: ProtocolRuntime>(
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `GENERATE_PATH` is never used
+ --> src/server/http.rs:9:11
+  |
+9 | pub const GENERATE_PATH: &str = "/v1/evaluations/generate";
+  |           ^^^^^^^^^^^^^
+
+warning: constant `MAX_HEADER_BYTES` is never used
+  --> src/server/http.rs:10:7
+   |
+10 | const MAX_HEADER_BYTES: usize = 16 * 1024;
+   |       ^^^^^^^^^^^^^^^^
+
+warning: constant `MAX_BODY_BYTES` is never used
+  --> src/server/http.rs:11:7
+   |
+11 | const MAX_BODY_BYTES: usize = 1024 * 1024;
+   |       ^^^^^^^^^^^^^^
+
+warning: function `serve` is never used
+  --> src/server/http.rs:13:8
+   |
+13 | pub fn serve<S: ProtocolRuntime + 'static>(
+   |        ^^^^^
+
+warning: function `handle_connection` is never used
+  --> src/server/http.rs:31:8
+   |
+31 | pub fn handle_connection<S: ProtocolRuntime>(
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `spawn_disconnect_monitor` is never used
+  --> src/server/http.rs:71:4
+   |
+71 | fn spawn_disconnect_monitor(
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `serve_generate` is never used
+  --> src/server/http.rs:94:4
+   |
+94 | fn serve_generate<S: ProtocolRuntime>(
+   |    ^^^^^^^^^^^^^^
+
+warning: function `empty_response` is never used
+   --> src/server/http.rs:153:4
+    |
+153 | fn empty_response() -> HttpResponse {
+    |    ^^^^^^^^^^^^^^
+
+warning: function `write_response` is never used
+   --> src/server/http.rs:161:4
+    |
+161 | fn write_response(stream: &mut TcpStream, response: HttpResponse) -> std::io::Result<()> {
+    |    ^^^^^^^^^^^^^^
+
+warning: struct `Request` is never constructed
+   --> src/server/http.rs:182:8
+    |
+182 | struct Request {
+    |        ^^^^^^^
+
+warning: function `read_request` is never used
+   --> src/server/http.rs:188:4
+    |
+188 | fn read_request(stream: &mut TcpStream) -> std::io::Result<Request> {
+    |    ^^^^^^^^^^^^
+
+warning: trait `Qwen35StepSession` is never used
+  --> src/server/qwen35_runtime.rs:19:11
+   |
+19 | pub trait Qwen35StepSession: Send {
+   |           ^^^^^^^^^^^^^^^^^
+
+warning: trait `Qwen35StepExecutor` is never used
+  --> src/server/qwen35_runtime.rs:24:11
+   |
+24 | pub trait Qwen35StepExecutor: Send + Sync + 'static {
+   |           ^^^^^^^^^^^^^^^^^^
+
+warning: enum `SessionCommand` is never used
+  --> src/server/qwen35_runtime.rs:74:6
+   |
+74 | enum SessionCommand {
+   |      ^^^^^^^^^^^^^^
+
+warning: struct `WorkerJob` is never constructed
+  --> src/server/qwen35_runtime.rs:79:8
+   |
+79 | struct WorkerJob {
+   |        ^^^^^^^^^
+
+warning: struct `OpenedSession` is never constructed
+  --> src/server/qwen35_runtime.rs:85:8
+   |
+85 | struct OpenedSession {
+   |        ^^^^^^^^^^^^^
+
+warning: struct `Qwen35ProtocolRuntime` is never constructed
+  --> src/server/qwen35_runtime.rs:89:12
+   |
+89 | pub struct Qwen35ProtocolRuntime {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `new` and `active_requests` are never used
+   --> src/server/qwen35_runtime.rs:98:12
+    |
+ 97 | impl Qwen35ProtocolRuntime {
+    | -------------------------- associated items in this implementation
+ 98 |     pub fn new(
+    |            ^^^
+...
+123 |     pub fn active_requests(&self) -> usize {
+    |            ^^^^^^^^^^^^^^^
+
+warning: function `worker_loop` is never used
+   --> src/server/qwen35_runtime.rs:183:4
+    |
+183 | fn worker_loop(
+    |    ^^^^^^^^^^^
+
+warning: function `run_session` is never used
+   --> src/server/qwen35_runtime.rs:220:4
+    |
+220 | fn run_session(
+    |    ^^^^^^^^^^^
+
+warning: struct `Qwen35ProtocolTokenStream` is never constructed
+   --> src/server/qwen35_runtime.rs:253:8
+    |
+253 | struct Qwen35ProtocolTokenStream {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `cancel_worker` is never used
+   --> src/server/qwen35_runtime.rs:260:8
+    |
+259 | impl Qwen35ProtocolTokenStream {
+    | ------------------------------ method in this implementation
+260 |     fn cancel_worker(&self) {
+    |        ^^^^^^^^^^^^^
+
+warning: constant `EOS_TOKEN_IDS` is never used
+ --> src/server/response.rs:5:11
+  |
+5 | pub const EOS_TOKEN_IDS: [u32; 2] = [248_046, 248_044];
+  |           ^^^^^^^^^^^^^
+
+warning: function `apply_eos` is never used
+ --> src/server/response.rs:7:8
+  |
+7 | pub fn apply_eos(output_ids: Vec<u32>, ignore_eos: bool) -> Vec<u32> {
+  |        ^^^^^^^^^
+
+warning: function `usage` is never used
+  --> src/server/response.rs:21:4
+   |
+21 | fn usage(prompt_tokens: usize, output_ids: &[u32]) -> serde_json::Value {
+   |    ^^^^^
+
+warning: function `result_json` is never used
+  --> src/server/response.rs:29:8
+   |
+29 | pub fn result_json(request_id: &str, prompt_tokens: usize, output_ids: &[u32]) -> Vec<u8> {
+   |        ^^^^^^^^^^^
+
+warning: function `error_json` is never used
+  --> src/server/response.rs:39:8
+   |
+39 | pub fn error_json(error: &ProtocolError) -> Vec<u8> {
+   |        ^^^^^^^^^^
+
+warning: function `sse_frames` is never used
+  --> src/server/response.rs:49:8
+   |
+49 | pub fn sse_frames(request_id: &str, prompt_tokens: usize, output_ids: &[u32]) -> Vec<Vec<u8>> {
+   |        ^^^^^^^^^^
+
+warning: function `sse_token_frame` is never used
+  --> src/server/response.rs:60:8
+   |
+60 | pub fn sse_token_frame(request_id: &str, index: usize, token_id: u32) -> Vec<u8> {
+   |        ^^^^^^^^^^^^^^^
+
+warning: function `sse_done_frame` is never used
+  --> src/server/response.rs:71:8
+   |
+71 | pub fn sse_done_frame(request_id: &str, prompt_tokens: usize, output_ids: &[u32]) -> Vec<u8> {
+   |        ^^^^^^^^^^^^^^
+
+warning: function `sse_done_sentinel` is never used
+  --> src/server/response.rs:81:8
+   |
+81 | pub fn sse_done_sentinel() -> Vec<u8> {
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: function `sse_error_frame` is never used
+  --> src/server/response.rs:85:8
+   |
+85 | pub fn sse_error_frame(request_id: &str, error: &apxinf_model::RuntimeError) -> Vec<u8> {
+   |        ^^^^^^^^^^^^^^^
+
+warning: constant `MODEL_VOCAB_SIZE` is never used
+ --> src/server/schema.rs:4:11
+  |
+4 | pub const MODEL_VOCAB_SIZE: u64 = 248_320;
+  |           ^^^^^^^^^^^^^^^^
+
+warning: struct `GenerateRequest` is never constructed
+ --> src/server/schema.rs:7:12
+  |
+7 | pub struct GenerateRequest {
+  |            ^^^^^^^^^^^^^^^
+
+warning: struct `ProtocolError` is never constructed
+  --> src/server/schema.rs:16:12
+   |
+16 | pub struct ProtocolError {
+   |            ^^^^^^^^^^^^^
+
+warning: associated function `invalid` is never used
+  --> src/server/schema.rs:22:12
+   |
+21 | impl ProtocolError {
+   | ------------------ associated function in this implementation
+22 |     pub fn invalid(message: impl Into<String>) -> Self {
+   |            ^^^^^^^
+
+warning: function `parse_generate_request` is never used
+  --> src/server/schema.rs:30:8
+   |
+30 | pub fn parse_generate_request(
+   |        ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `EVALUATION_CONTRACT` is never used
+  --> src/server/service.rs:13:11
+   |
+13 | pub const EVALUATION_CONTRACT: &str = "apxinf.qwen38_27b.inference_interface.v1";
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: trait `TokenStream` is never used
+  --> src/server/service.rs:16:11
+   |
+16 | pub trait TokenStream: Send {
+   |           ^^^^^^^^^^^
+
+warning: trait `ProtocolRuntime` is never used
+  --> src/server/service.rs:21:11
+   |
+21 | pub trait ProtocolRuntime: Send + Sync {
+   |           ^^^^^^^^^^^^^^^
+
+warning: struct `HttpResponse` is never constructed
+  --> src/server/service.rs:34:12
+   |
+34 | pub struct HttpResponse {
+   |            ^^^^^^^^^^^^
+
+warning: struct `ActiveGeneration` is never constructed
+  --> src/server/service.rs:40:12
+   |
+40 | pub struct ActiveGeneration {
+   |            ^^^^^^^^^^^^^^^^
+
+warning: methods `request_id`, `prompt_tokens`, `output_ids`, `next_output_token`, `cancel`, and `cancel_runtime` are never used
+  --> src/server/service.rs:52:12
+   |
+51 | impl ActiveGeneration {
+   | --------------------- methods in this implementation
+52 |     pub fn request_id(&self) -> &str {
+   |            ^^^^^^^^^^
+...
+56 |     pub fn prompt_tokens(&self) -> usize {
+   |            ^^^^^^^^^^^^^
+...
+60 |     pub fn output_ids(&self) -> &[u32] {
+   |            ^^^^^^^^^^
+...
+64 |     pub fn next_output_token(&mut self) -> Result<Option<u32>, RuntimeError> {
+   |            ^^^^^^^^^^^^^^^^^
+...
+89 |     pub fn cancel(&mut self) {
+   |            ^^^^^^
+...
+96 |     fn cancel_runtime(&self) {
+   |        ^^^^^^^^^^^^^^
+
+warning: enum `SsePhase` is never used
+   --> src/server/service.rs:108:6
+    |
+108 | enum SsePhase {
+    |      ^^^^^^^^
+
+warning: struct `SseGeneration` is never constructed
+   --> src/server/service.rs:114:12
+    |
+114 | pub struct SseGeneration {
+    |            ^^^^^^^^^^^^^
+
+warning: methods `request_id`, `next_frame`, and `cancel` are never used
+   --> src/server/service.rs:121:12
+    |
+120 | impl SseGeneration {
+    | ------------------ methods in this implementation
+121 |     pub fn request_id(&self) -> &str {
+    |            ^^^^^^^^^^
+...
+125 |     pub fn next_frame(&mut self) -> Result<Option<Vec<u8>>, RuntimeError> {
+    |            ^^^^^^^^^^
+...
+157 |     pub fn cancel(&mut self) {
+    |            ^^^^^^
+
+warning: struct `ProtocolService` is never constructed
+   --> src/server/service.rs:163:12
+    |
+163 | pub struct ProtocolService<R> {
+    |            ^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+   --> src/server/service.rs:173:12
+    |
+172 | impl<R: ProtocolRuntime> ProtocolService<R> {
+    | ------------------------------------------- associated items in this implementation
+173 |     pub fn new(runtime: R, stub: bool) -> Self {
+    |            ^^^
+...
+177 |     pub fn new_unready(runtime: R, stub: bool) -> Self {
+    |            ^^^^^^^^^^^
+...
+181 |     fn with_readiness(runtime: R, stub: bool, ready: bool) -> Self {
+    |        ^^^^^^^^^^^^^^
+...
+197 |     pub fn health_json(&self) -> Vec<u8> {
+    |            ^^^^^^^^^^^
+...
+201 |     fn health_json_inner(&self) -> Vec<u8> {
+    |        ^^^^^^^^^^^^^^^^^
+...
+223 |     pub fn health_response(&self) -> HttpResponse {
+    |            ^^^^^^^^^^^^^^^
+...
+238 |     pub fn warmup(&self) -> Result<(), RuntimeError> {
+    |            ^^^^^^
+...
+243 |     fn recovery_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+    |        ^^^^^^^^^^^^^^
+...
+250 |     fn warmup_inner(&self) -> Result<(), RuntimeError> {
+    |        ^^^^^^^^^^^^
+...
+264 |     pub fn mark_unhealthy(&self) {
+    |            ^^^^^^^^^^^^^^
+...
+268 |     pub fn mark_ready(&self) {
+    |            ^^^^^^^^^^
+...
+272 |     pub fn handle_non_stream(&self, raw: &[u8]) -> HttpResponse {
+    |            ^^^^^^^^^^^^^^^^^
+...
+279 |     pub fn handle_non_stream_with_cancel(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+321 |     pub fn start_stream(&self, raw: &[u8]) -> Result<SseGeneration, HttpResponse> {
+    |            ^^^^^^^^^^^^
+...
+328 |     pub fn start_stream_with_cancel(
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+351 |     fn start(
+    |        ^^^^^
+...
+376 |     fn note_runtime_error(&self, error: &RuntimeError) {
+    |        ^^^^^^^^^^^^^^^^^^
+...
+382 |     fn next_id(&self) -> String {
+    |        ^^^^^^^
+
+warning: function `invalid_response` is never used
+   --> src/server/service.rs:390:4
+    |
+390 | fn invalid_response(error: ProtocolError) -> HttpResponse {
+    |    ^^^^^^^^^^^^^^^^
+
+warning: function `runtime_response` is never used
+   --> src/server/service.rs:398:15
+    |
+398 | pub(crate) fn runtime_response(error: RuntimeError) -> HttpResponse {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `is_fatal_runtime_error` is never used
+   --> src/server/service.rs:419:4
+    |
+419 | fn is_fatal_runtime_error(error: &RuntimeError) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `apxinf` (bin "apxinf") generated 56 warnings (run `cargo fix --bin "apxinf" -p apxinf` to apply 2 suggestions)
+warning: unused import: `bias_f16`
+ --> crates/apxinf-cuda/src/kernels/attention.rs:9:26
+  |
+9 | use super::elementwise::{bias_f16, concat_rows_f16};
+  |                          ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `may_prepare_native_resources`
+  --> crates/apxinf-cuda/src/kernels/attention.rs:14:24
+   |
+14 | use crate::workspace::{may_prepare_native_resources, output_buffer};
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `seed` is never read
+  --> crates/apxinf-cuda/src/kernels/gemm/fp8.rs:58:5
+   |
+55 | struct ColdL2Evictor {
+   |        ------------- field in this struct
+...
+58 |     seed: u32,
+   |     ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `evict` is never used
+  --> crates/apxinf-cuda/src/kernels/gemm/fp8.rs:73:8
+   |
+61 | impl ColdL2Evictor {
+   | ------------------ method in this implementation
+...
+73 |     fn evict(&mut self, ctx: &CudaContext) -> Result<()> {
+   |        ^^^^^
+
+warning: struct `CudaEventPair` is never constructed
+  --> crates/apxinf-cuda/src/kernels/gemm/fp8.rs:87:8
+   |
+87 | struct CudaEventPair {
+   |        ^^^^^^^^^^^^^
+
+warning: associated items `new` and `measure` are never used
+   --> crates/apxinf-cuda/src/kernels/gemm/fp8.rs:93:8
+    |
+ 92 | impl CudaEventPair {
+    | ------------------ associated items in this implementation
+ 93 |     fn new() -> Result<Self> {
+    |        ^^^
+...
+108 |     fn measure(
+    |        ^^^^^^^
+
+warning: constant `cudaHostAllocDefault` should have an upper case name
+  --> crates/apxinf-cuda/src/ffi/cuda.rs:40:11
+   |
+40 | pub const cudaHostAllocDefault: u32 = 0;
+   |           ^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `CUDA_HOST_ALLOC_DEFAULT`
+   |
+   = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: constant `cudaHostAllocPortable` should have an upper case name
+  --> crates/apxinf-cuda/src/ffi/cuda.rs:41:11
+   |
+41 | pub const cudaHostAllocPortable: u32 = 1;
+   |           ^^^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+41 - pub const cudaHostAllocPortable: u32 = 1;
+41 + pub const CUDA_HOST_ALLOC_PORTABLE: u32 = 1;
+   |
+
+warning: constant `cudaHostAllocMapped` should have an upper case name
+  --> crates/apxinf-cuda/src/ffi/cuda.rs:42:11
+   |
+42 | pub const cudaHostAllocMapped: u32 = 2;
+   |           ^^^^^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+42 - pub const cudaHostAllocMapped: u32 = 2;
+42 + pub const CUDA_HOST_ALLOC_MAPPED: u32 = 2;
+   |
+
+warning: constant `cudaHostAllocWriteCombined` should have an upper case name
+  --> crates/apxinf-cuda/src/ffi/cuda.rs:43:11
+   |
+43 | pub const cudaHostAllocWriteCombined: u32 = 4;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `CUDA_HOST_ALLOC_WRITE_COMBINED`
+
+warning: `apxinf-cuda` (lib) generated 10 warnings (run `cargo fix --lib -p apxinf-cuda` to apply 6 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 24.36s
+assignment checks passed
+EXIT_CODE=0

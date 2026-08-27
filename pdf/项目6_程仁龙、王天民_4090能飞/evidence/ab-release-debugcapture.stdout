@@ -1,0 +1,7 @@
+[release-debugcapture] frozen: 200 15.44s sha_match=True
+[release-debugcapture] functional text-niah-1024-p50: passed=True (12 tokens, ttft=77.8s)
+[release-debugcapture] perf-1024 warmup ok=True ttft=78.213s tpot=0.1092s
+[release-debugcapture] perf-1024 repeat=0 ok=True ttft=80.410s tpot=0.1091s
+[release-debugcapture] perf-1024 repeat=1 ok=True ttft=78.225s tpot=0.1092s
+[release-debugcapture] perf-1024 repeat=2 ok=True ttft=78.166s tpot=0.1096s
+[release-debugcapture] ttft_med=78.22538590431213 tpot_med=0.10924076857998616 -> /tmp/apxinf-evidence/ab/ab-release-debugcapture.json

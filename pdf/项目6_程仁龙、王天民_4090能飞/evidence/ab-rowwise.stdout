@@ -1,0 +1,7 @@
+[rowwise-softmax] frozen: 200 8.68s sha_match=False
+[rowwise-softmax] functional text-niah-1024-p50: passed=True (12 tokens, ttft=1.6s)
+[rowwise-softmax] perf-1024 warmup ok=True ttft=1.647s tpot=0.0671s
+[rowwise-softmax] perf-1024 repeat=0 ok=True ttft=1.627s tpot=0.0667s
+[rowwise-softmax] perf-1024 repeat=1 ok=True ttft=1.619s tpot=0.0671s
+[rowwise-softmax] perf-1024 repeat=2 ok=True ttft=1.622s tpot=0.0674s
+[rowwise-softmax] ttft_med=1.6217982843518257 tpot_med=0.06712353024191743 -> /tmp/apxinf-evidence/ab/ab-rowwise-softmax.json

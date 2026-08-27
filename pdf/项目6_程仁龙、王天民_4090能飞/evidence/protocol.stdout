@@ -1,0 +1,16 @@
+malformed_json                       status=400 passed=True
+empty_input_ids                      status=400 passed=True
+negative_token_id                    status=400 passed=True
+out_of_vocabulary_token_id           status=400 passed=True
+unsupported_temperature              status=400 passed=True
+over_budget                          status=400 passed=True
+unsupported_modality_field           status=400 passed=True
+valid_short_nostream_request         status=200 passed=True
+valid_short semantics: {'type_is_result': True, 'one_output_token': True, 'usage_8_1_9': True, 'usage': {'completion_tokens': 1, 'prompt_tokens': 8, 'total_tokens': 9}, 'output_ids': [2037]}
+health_after_invalid_requests        status=200 passed=True
+health_contract_identity             status=200 passed=True
+health contract identity: apxinf.qwen38_27b.inference_interface.v1 ok
+sse_stream_request          status=200 tokens=8 passed=True
+eos ignore_eos=false: [2037, 9, 10, 4838, 1665, 25, 33898, 2110, 30, 31, 25223, 87197] completion= 16
+
+protocol passed=True rows=12 sha256=5b6e1bcfa8be3ae150e8b97e3082a3564f70975c52ae0f7b97d7d8cf1bbc6748

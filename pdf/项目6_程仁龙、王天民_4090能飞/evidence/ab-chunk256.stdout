@@ -1,0 +1,7 @@
+[chunk256] frozen: 200 8.88s sha_match=False
+[chunk256] functional text-niah-1024-p50: passed=True (12 tokens, ttft=2.4s)
+[chunk256] perf-1024 warmup ok=True ttft=2.524s tpot=0.0683s
+[chunk256] perf-1024 repeat=0 ok=True ttft=2.612s tpot=0.0686s
+[chunk256] perf-1024 repeat=1 ok=True ttft=2.385s tpot=0.0680s
+[chunk256] perf-1024 repeat=2 ok=True ttft=2.365s tpot=0.0685s
+[chunk256] ttft_med=2.3846737146377563 tpot_med=0.06848996414208976 -> /tmp/apxinf-evidence/ab/ab-chunk256.json

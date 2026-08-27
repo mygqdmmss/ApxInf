@@ -1,0 +1,29 @@
+
+running 1 test
+test qwen35::cuda::tests::real_layer_profile_harness_prefill_and_decode ... CUDA 0: NVIDIA GeForce RTX 4090 (compute 8.9, sm80-family, 128 SMs)
+profile gdn_prefill: rows=64 iters=8 total=45.070242ms per_call=5.63378ms
+profile attention_prefill: rows=64 iters=8 total=36.728118ms per_call=4.591014ms
+profile gdn_stage_projections_in: rows=64 iters=8 total=7.571529ms per_call=946.441µs
+profile gdn_stage_conv_prefill: rows=64 iters=8 total=5.868173ms per_call=733.521µs
+profile gdn_stage_delta_prefill: rows=64 iters=8 total=11.907485ms per_call=1.488435ms
+profile gdn_stage_norm_out_mlp: rows=64 iters=8 total=21.797815ms per_call=2.724726ms
+profile micro_cuda_malloc_free_178mb: rows=64 iters=8 total=17.002953ms per_call=2.125369ms
+profile micro_cuda_malloc_free_4b: rows=64 iters=8 total=28.682µs per_call=3.585µs
+profile micro_mlp_gate_project_only: rows=64 iters=8 total=11.671078ms per_call=1.458884ms
+profile gdn_decode: rows=64 iters=8 total=11.843898ms per_call=1.480487ms
+profile attention_decode: rows=64 iters=8 total=44.471478ms per_call=5.558934ms
+profile gdn_decode_reused_state: rows=64 iters=8 total=7.580336ms per_call=947.542µs
+profile attn_decode_reused_state: rows=64 iters=8 total=8.102545ms per_call=1.012818ms
+profile attn_stage_softmax_only: rows=64 iters=8 total=1.423592ms per_call=177.949µs
+profile attn_softmax_shape: rows=1536 cols=1024 elements=1572864 redundant_block_rescans=4
+profile dec_stage_in_projections: rows=64 iters=8 total=1.521312ms per_call=190.164µs
+profile dec_stage_mlp_projections: rows=64 iters=8 total=3.438429ms per_call=429.803µs
+profile dec_stage_mlp_down_only: rows=64 iters=8 total=1.044896ms per_call=130.612µs
+profile dec_stage_mlp_gate_only: rows=64 iters=8 total=1.038806ms per_call=129.85µs
+profile dec_stage_conv_step: rows=64 iters=8 total=254.791µs per_call=31.848µs
+profile lm_head_project_only: rows=64 iters=8 total=21.369564ms per_call=2.671195ms
+profile lm_head_project_d2h_argmax: rows=64 iters=8 total=24.221888ms per_call=3.027736ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 120 filtered out; finished in 9.10s
+

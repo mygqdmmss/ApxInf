@@ -1,0 +1,431 @@
+{
+ "base_url": "http://127.0.0.1:18080",
+ "captured_at": "2026-08-25T09:57:10.839617+00:00",
+ "max_model_len": 32768,
+ "passed": true,
+ "rows": [
+  {
+   "elapsed_ms": 0.65,
+   "expect_error_json": true,
+   "expect_status": 400,
+   "id": "malformed_json",
+   "mode": "raw",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{not-json",
+   "request_body_raw": "{not-json",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "error": {
+     "message": "malformed JSON: key must be a string at line 1 column 2",
+     "type": "invalid_request"
+    }
+   },
+   "response_raw": "{\"error\":{\"message\":\"malformed JSON: key must be a string at line 1 column 2\",\"type\":\"invalid_request\"}}",
+   "started_at": "2026-08-25T09:57:06.158160+00:00",
+   "status_code": 400
+  },
+  {
+   "elapsed_ms": 0.623,
+   "expect_error_json": true,
+   "expect_status": 400,
+   "id": "empty_input_ids",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{\"input_ids\": [], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_body_raw": "{\"input_ids\": [], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "error": {
+     "message": "input_ids must not be empty",
+     "type": "invalid_request"
+    }
+   },
+   "response_raw": "{\"error\":{\"message\":\"input_ids must not be empty\",\"type\":\"invalid_request\"}}",
+   "started_at": "2026-08-25T09:57:06.158855+00:00",
+   "status_code": 400
+  },
+  {
+   "elapsed_ms": 0.428,
+   "expect_error_json": true,
+   "expect_status": 400,
+   "id": "negative_token_id",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{\"input_ids\": [-1], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_body_raw": "{\"input_ids\": [-1], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "error": {
+     "message": "token id -1 is outside model vocabulary [0, 248320)",
+     "type": "invalid_request"
+    }
+   },
+   "response_raw": "{\"error\":{\"message\":\"token id -1 is outside model vocabulary [0, 248320)\",\"type\":\"invalid_request\"}}",
+   "started_at": "2026-08-25T09:57:06.159339+00:00",
+   "status_code": 400
+  },
+  {
+   "elapsed_ms": 0.456,
+   "expect_error_json": true,
+   "expect_status": 400,
+   "id": "out_of_vocabulary_token_id",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{\"input_ids\": [4294967295], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_body_raw": "{\"input_ids\": [4294967295], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "error": {
+     "message": "token id 4294967295 is outside model vocabulary [0, 248320)",
+     "type": "invalid_request"
+    }
+   },
+   "response_raw": "{\"error\":{\"message\":\"token id 4294967295 is outside model vocabulary [0, 248320)\",\"type\":\"invalid_request\"}}",
+   "started_at": "2026-08-25T09:57:06.159849+00:00",
+   "status_code": 400
+  },
+  {
+   "elapsed_ms": 0.597,
+   "expect_error_json": true,
+   "expect_status": 400,
+   "id": "unsupported_temperature",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{\"input_ids\": [1], \"max_new_tokens\": 1, \"temperature\": 0.1, \"ignore_eos\": true, \"stream\": false}",
+   "request_body_raw": "{\"input_ids\": [1], \"max_new_tokens\": 1, \"temperature\": 0.1, \"ignore_eos\": true, \"stream\": false}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "error": {
+     "message": "temperature must be exactly 0 for greedy generation",
+     "type": "invalid_request"
+    }
+   },
+   "response_raw": "{\"error\":{\"message\":\"temperature must be exactly 0 for greedy generation\",\"type\":\"invalid_request\"}}",
+   "started_at": "2026-08-25T09:57:06.160502+00:00",
+   "status_code": 400
+  },
+  {
+   "elapsed_ms": 0.574,
+   "expect_error_json": true,
+   "expect_status": 400,
+   "id": "over_budget",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{\"input_ids\": [1], \"max_new_tokens\": 32768, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_body_raw": "{\"input_ids\": [1], \"max_new_tokens\": 32768, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "error": {
+     "message": "prompt tokens 1 plus max_new_tokens 32768 exceed max_model_len 32768",
+     "type": "invalid_request"
+    }
+   },
+   "response_raw": "{\"error\":{\"message\":\"prompt tokens 1 plus max_new_tokens 32768 exceed max_model_len 32768\",\"type\":\"invalid_request\"}}",
+   "started_at": "2026-08-25T09:57:06.161127+00:00",
+   "status_code": 400
+  },
+  {
+   "elapsed_ms": 0.537,
+   "expect_error_json": true,
+   "expect_status": 400,
+   "id": "unsupported_modality_field",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{\"input_ids\": [1], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false, \"images\": [\"x\"]}",
+   "request_body_raw": "{\"input_ids\": [1], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false, \"images\": [\"x\"]}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "error": {
+     "message": "unsupported field `images`",
+     "type": "invalid_request"
+    }
+   },
+   "response_raw": "{\"error\":{\"message\":\"unsupported field `images`\",\"type\":\"invalid_request\"}}",
+   "started_at": "2026-08-25T09:57:06.161712+00:00",
+   "status_code": 400
+  },
+  {
+   "elapsed_ms": 680.958,
+   "expect_error_json": false,
+   "expect_status": 200,
+   "id": "valid_short_nostream_request",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "{\"input_ids\": [1, 2, 3, 4, 5, 6, 7, 8], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_body_raw": "{\"input_ids\": [1, 2, 3, 4, 5, 6, 7, 8], \"max_new_tokens\": 1, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": false}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "output_ids": [
+     2037
+    ],
+    "request_id": "req-2",
+    "type": "result",
+    "usage": {
+     "completion_tokens": 1,
+     "prompt_tokens": 8,
+     "total_tokens": 9
+    }
+   },
+   "response_raw": "{\"output_ids\":[2037],\"request_id\":\"req-2\",\"type\":\"result\",\"usage\":{\"completion_tokens\":1,\"prompt_tokens\":8,\"total_tokens\":9}}",
+   "response_semantics": {
+    "one_output_token": true,
+    "output_ids": [
+     2037
+    ],
+    "type_is_result": true,
+    "usage": {
+     "completion_tokens": 1,
+     "prompt_tokens": 8,
+     "total_tokens": 9
+    },
+    "usage_8_1_9": true
+   },
+   "started_at": "2026-08-25T09:57:06.842741+00:00",
+   "status_code": 200
+  },
+  {
+   "elapsed_ms": 0.568,
+   "expect_error_json": false,
+   "expect_status": 200,
+   "id": "health_after_invalid_requests",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "",
+   "request_body_raw": "",
+   "request_method": "GET",
+   "request_path": "/health",
+   "response": {
+    "capabilities": {
+     "multimodal": false,
+     "pretokenized_input_ids": true,
+     "token_id_output": true
+    },
+    "evaluation_contract": "apxinf.qwen38_27b.inference_interface.v1",
+    "fallback_active": false,
+    "max_model_len": 32768,
+    "model_revision": "63768c10df38c0395e12ef49edac1bd539eaeeea",
+    "parallel_requests": 1,
+    "status": "ok",
+    "stub": false,
+    "vocab_size": 248320
+   },
+   "response_raw": "{\"capabilities\":{\"multimodal\":false,\"pretokenized_input_ids\":true,\"token_id_output\":true},\"evaluation_contract\":\"apxinf.qwen38_27b.inference_interface.v1\",\"fallback_active\":false,\"max_model_len\":32768,\"model_revision\":\"63768c10df38c0395e12ef49edac1bd539eaeeea\",\"parallel_requests\":1,\"status\":\"ok\",\"stub\":false,\"vocab_size\":248320}",
+   "started_at": "2026-08-25T09:57:06.843397+00:00",
+   "status_code": 200
+  },
+  {
+   "contract_identity_ok": true,
+   "elapsed_ms": 0.49,
+   "expect_error_json": false,
+   "expect_status": 200,
+   "id": "health_contract_identity",
+   "mode": "json",
+   "note": "",
+   "parsed_json": true,
+   "passed": true,
+   "request_body": "",
+   "request_body_raw": "",
+   "request_method": "GET",
+   "request_path": "/health",
+   "response": {
+    "capabilities": {
+     "multimodal": false,
+     "pretokenized_input_ids": true,
+     "token_id_output": true
+    },
+    "evaluation_contract": "apxinf.qwen38_27b.inference_interface.v1",
+    "fallback_active": false,
+    "max_model_len": 32768,
+    "model_revision": "63768c10df38c0395e12ef49edac1bd539eaeeea",
+    "parallel_requests": 1,
+    "status": "ok",
+    "stub": false,
+    "vocab_size": 248320
+   },
+   "response_raw": "{\"capabilities\":{\"multimodal\":false,\"pretokenized_input_ids\":true,\"token_id_output\":true},\"evaluation_contract\":\"apxinf.qwen38_27b.inference_interface.v1\",\"fallback_active\":false,\"max_model_len\":32768,\"model_revision\":\"63768c10df38c0395e12ef49edac1bd539eaeeea\",\"parallel_requests\":1,\"status\":\"ok\",\"stub\":false,\"vocab_size\":248320}",
+   "started_at": "2026-08-25T09:57:06.843925+00:00",
+   "status_code": 200
+  },
+  {
+   "elapsed_ms": 1523.136,
+   "id": "sse_stream_request",
+   "mode": "json",
+   "passed": true,
+   "request_body": "{\"input_ids\": [1, 2, 3, 4, 5, 6, 7, 8], \"max_new_tokens\": 8, \"temperature\": 0.0, \"ignore_eos\": true, \"stream\": true}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": [
+    {
+     "index": 0,
+     "request_id": "req-3",
+     "token_id": 2037,
+     "type": "token"
+    },
+    {
+     "index": 1,
+     "request_id": "req-3",
+     "token_id": 9,
+     "type": "token"
+    },
+    {
+     "index": 2,
+     "request_id": "req-3",
+     "token_id": 10,
+     "type": "token"
+    },
+    {
+     "index": 3,
+     "request_id": "req-3",
+     "token_id": 4838,
+     "type": "token"
+    },
+    {
+     "index": 4,
+     "request_id": "req-3",
+     "token_id": 1665,
+     "type": "token"
+    },
+    {
+     "index": 5,
+     "request_id": "req-3",
+     "token_id": 25,
+     "type": "token"
+    },
+    {
+     "index": 6,
+     "request_id": "req-3",
+     "token_id": 33898,
+     "type": "token"
+    },
+    {
+     "index": 7,
+     "request_id": "req-3",
+     "token_id": 2110,
+     "type": "token"
+    },
+    {
+     "request_id": "req-3",
+     "type": "done",
+     "usage": {
+      "completion_tokens": 8,
+      "prompt_tokens": 8,
+      "total_tokens": 16
+     }
+    }
+   ],
+   "response_raw": "data: {\"index\":0,\"request_id\":\"req-3\",\"token_id\":2037,\"type\":\"token\"}\n\ndata: {\"index\":1,\"request_id\":\"req-3\",\"token_id\":9,\"type\":\"token\"}\n\ndata: {\"index\":2,\"request_id\":\"req-3\",\"token_id\":10,\"type\":\"token\"}\n\ndata: {\"index\":3,\"request_id\":\"req-3\",\"token_id\":4838,\"type\":\"token\"}\n\ndata: {\"index\":4,\"request_id\":\"req-3\",\"token_id\":1665,\"type\":\"token\"}\n\ndata: {\"index\":5,\"request_id\":\"req-3\",\"token_id\":25,\"type\":\"token\"}\n\ndata: {\"index\":6,\"request_id\":\"req-3\",\"token_id\":33898,\"type\":\"token\"}\n\ndata: {\"index\":7,\"request_id\":\"req-3\",\"token_id\":2110,\"type\":\"token\"}\n\ndata: {\"request_id\":\"req-3\",\"type\":\"done\",\"usage\":{\"completion_tokens\":8,\"prompt_tokens\":8,\"total_tokens\":16}}\n\ndata: [DONE]\n\n",
+   "sse_checks": {
+    "done_usage": {
+     "completion_tokens": 8,
+     "prompt_tokens": 8,
+     "total_tokens": 16
+    },
+    "indexes_ok": true,
+    "request_ids": [
+     "req-3"
+    ],
+    "saw_done": true,
+    "token_ids": [
+     2037,
+     9,
+     10,
+     4838,
+     1665,
+     25,
+     33898,
+     2110
+    ]
+   },
+   "started_at": "2026-08-25T09:57:08.367210+00:00",
+   "status_code": 200
+  },
+  {
+   "elapsed_ms": 2472.237,
+   "eos_check": {
+    "completion_tokens": 16,
+    "output_ids": [
+     2037,
+     9,
+     10,
+     4838,
+     1665,
+     25,
+     33898,
+     2110,
+     30,
+     31,
+     25223,
+     87197,
+     62,
+     63,
+     44576,
+     92
+    ],
+    "stopped_before_budget": false
+   },
+   "id": "eos_ignore_eos_false",
+   "mode": "json",
+   "passed": true,
+   "request_body": "{\"input_ids\": [1, 2, 3, 4, 5, 6, 7, 8], \"max_new_tokens\": 16, \"temperature\": 0.0, \"ignore_eos\": false, \"stream\": false}",
+   "request_method": "POST",
+   "request_path": "/v1/evaluations/generate",
+   "response": {
+    "output_ids": [
+     2037,
+     9,
+     10,
+     4838,
+     1665,
+     25,
+     33898,
+     2110,
+     30,
+     31,
+     25223,
+     87197,
+     62,
+     63,
+     44576,
+     92
+    ],
+    "request_id": "req-4",
+    "type": "result",
+    "usage": {
+     "completion_tokens": 16,
+     "prompt_tokens": 8,
+     "total_tokens": 24
+    }
+   },
+   "response_raw": "{\"output_ids\":[2037,9,10,4838,1665,25,33898,2110,30,31,25223,87197,62,63,44576,92],\"request_id\":\"req-4\",\"type\":\"result\",\"usage\":{\"completion_tokens\":16,\"prompt_tokens\":8,\"total_tokens\":24}}",
+   "started_at": "2026-08-25T09:57:10.839575+00:00",
+   "status_code": 200
+  }
+ ],
+ "schema": "apxinf.protocol-evidence.v1"
+}

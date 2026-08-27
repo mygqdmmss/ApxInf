@@ -1,0 +1,8 @@
+[repro-broken] streamed 8K request sent, socket closed at +2.00s
+[repro-broken] +   2.00s probe=503 health=200 {"error":{"message":"runtime capacity is exhausted","type":"capacity"}}
+[repro-broken] +   4.00s probe=503 health=200 {"error":{"message":"runtime capacity is exhausted","type":"capacity"}}
+[repro-broken] +   6.00s probe=503 health=200 {"error":{"message":"runtime capacity is exhausted","type":"capacity"}}
+[repro-broken] +   8.01s probe=503 health=200 {"error":{"message":"runtime capacity is exhausted","type":"capacity"}}
+[repro-broken] +  10.01s probe=503 health=200 {"error":{"message":"runtime capacity is exhausted","type":"capacity"}}
+[repro-broken] +  12.01s probe=503 health=200 {"error":{"message":"runtime capacity is exhausted","type":"capacity"}}
+[repro-broken] +  14.01s probe=503 health=200 {"error":{"message":"runtime capacity is exhausted","type":"capacity"}}

@@ -1,0 +1,9 @@
+{
+  "multimodal_evidence_attached": false,
+  "public_correctness": "6/6",
+  "public_trajectory": "256/256",
+  "raw_sha256": "7324f0a460439f8b16dcf23a1c910145fed5a1677075dcc52d1f3d2a2ae8c751",
+  "request_success_rate": 1.0,
+  "run_dir": "benchmarks/qwen38_4090/evaluation/runs/20260826-183957-apxinf",
+  "submission": "benchmarks/qwen38_4090/evaluation/runs/20260826-183957-apxinf/submission.json"
+}

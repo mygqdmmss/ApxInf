@@ -1,0 +1,7 @@
+[release-nocapture-only] frozen: 200 13.86s sha_match=True
+[release-nocapture-only] functional text-niah-1024-p50: passed=True (12 tokens, ttft=77.2s)
+[release-nocapture-only] perf-1024 warmup ok=True ttft=79.167s tpot=0.1055s
+[release-nocapture-only] perf-1024 repeat=0 ok=True ttft=77.701s tpot=0.1107s
+[release-nocapture-only] perf-1024 repeat=1 ok=True ttft=77.333s tpot=0.1051s
+[release-nocapture-only] perf-1024 repeat=2 ok=True ttft=77.219s tpot=0.1051s
+[release-nocapture-only] ttft_med=77.33312643319368 tpot_med=0.10507473631167975 -> /tmp/apxinf-evidence/ab/ab-release-nocapture-only.json

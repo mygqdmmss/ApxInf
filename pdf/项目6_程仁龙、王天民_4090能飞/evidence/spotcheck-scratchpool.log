@@ -1,0 +1,3 @@
+text-perf-8192: ttft=94.1s total=105.1s tokens=128 vram=19958MiB
+text-perf-16384: ttft=488.1s total=506.8s tokens=128 vram=19958MiB
+SPOTCHECK_DONE

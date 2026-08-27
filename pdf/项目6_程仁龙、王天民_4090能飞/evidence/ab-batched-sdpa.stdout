@@ -1,0 +1,26 @@
+Traceback (most recent call last):
+  File "/tmp/apxinf-ab-probe.py", line 152, in <module>
+    main()
+  File "/tmp/apxinf-ab-probe.[batched-sdpa] perf-1024 warmup ok=True ttft=21.453s tpot=0.0676s
+[batched-sdpa] perf-1024 repeat=0 ok=True ttft=19.014s tpot=0.0674s
+[batched-sdpa] perf-1024 repeat=1 ok=True ttft=21.350s tpot=0.0667s
+[batched-sdpa] perf-1024 repeat=2 ok=True ttft=18.686s tpot=0.0662s
+[batched-sdpa] ttft_med=19.014168687164783 tpot_med=0.06668858529310527 -> /tmp/apxinf-evidence/ab/ab-batched-sdpa.json
+est.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 503: Service Unavailable

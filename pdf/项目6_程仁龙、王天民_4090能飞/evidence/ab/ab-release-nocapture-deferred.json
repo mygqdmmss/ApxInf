@@ -1,0 +1,43 @@
+{
+ "frozen": {
+  "elapsed_s": 14.026,
+  "matches_baseline": true,
+  "output_sha256": "32b08629c08d40575e68c946852ea748a8dd32ad3c712e640073651ba642b945",
+  "status": 200,
+  "usage": {
+   "completion_tokens": 128,
+   "prompt_tokens": 8,
+   "total_tokens": 136
+  }
+ },
+ "functional": {
+  "case": "text-niah-1024-p50",
+  "expected": "KEY-P50-615408",
+  "passed": true,
+  "status": 200,
+  "text": "KEY-P50-615408",
+  "tokens": 12
+ },
+ "label": "release-nocapture-deferred",
+ "perf_1024": {
+  "measured": 3,
+  "peak_vram_mib": 19498,
+  "success": 3,
+  "tpot_all_s": [
+   0.10652408408602392,
+   0.10552940910726082,
+   0.1048434343277
+  ],
+  "tpot_cv": 0.007999794973211256,
+  "tpot_median_s": 0.10552940910726082,
+  "ttft_all_s": [
+   78.36266491562128,
+   77.29168281704187,
+   77.25551061332226
+  ],
+  "ttft_cv": 0.008102283232279293,
+  "ttft_median_s": 77.29168281704187
+ },
+ "repeats": 3,
+ "schema": "apxinf.ab-probe.v1"
+}

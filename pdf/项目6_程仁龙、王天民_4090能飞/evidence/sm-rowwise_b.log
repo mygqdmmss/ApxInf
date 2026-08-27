@@ -1,0 +1,37 @@
+
+running 1 test
+test qwen35::cuda::tests::real_layer_profile_harness_prefill_and_decode ... CUDA 0: NVIDIA GeForce RTX 4090 (compute 8.9, sm80-family, 128 SMs)
+profile gdn_prefill: rows=512 iters=2 total=28.266561ms per_call=14.13328ms
+profile attention_prefill: rows=512 iters=2 total=23.268343ms per_call=11.634171ms
+profile gdn_stage_projections_in: rows=512 iters=2 total=2.909578ms per_call=1.454789ms
+profile gdn_stage_conv_prefill: rows=512 iters=2 total=2.522908ms per_call=1.261454ms
+profile gdn_stage_delta_prefill: rows=512 iters=2 total=9.55251ms per_call=4.776255ms
+profile gdn_stage_norm_out_mlp: rows=512 iters=2 total=12.157527ms per_call=6.078763ms
+profile micro_cuda_malloc_free_178mb: rows=512 iters=2 total=4.349549ms per_call=2.174774ms
+profile micro_cuda_malloc_free_4b: rows=512 iters=2 total=6.736µs per_call=3.368µs
+profile micro_mlp_gate_project_only: rows=512 iters=2 total=4.213623ms per_call=2.106811ms
+profile gdn_decode: rows=512 iters=2 total=3.271463ms per_call=1.635731ms
+profile attention_decode: rows=512 iters=2 total=24.538437ms per_call=12.269218ms
+profile gdn_decode_reused_state: rows=512 iters=2 total=1.869207ms per_call=934.603µs
+profile attn_decode_reused_state: rows=512 iters=2 total=2.438709ms per_call=1.219354ms
+profile attn_stage_softmax_only: rows=512 iters=2 total=1.174627ms per_call=587.313µs
+profile attn_softmax_shape: rows=12288 cols=1024 elements=12582912 redundant_block_rescans=4
+profile attn_prefill_staircase: preload=16384 block_rows=512 blocks=32 final_kv=16384 total=678.978151ms per_block_avg=21.218067ms
+profile attn_stage_full_sdpa_at_final_kv: rows=512 iters=2 total=27.384699ms per_call=13.692349ms
+profile attn_stage_scale_only: rows=512 iters=2 total=6.472743ms per_call=3.236371ms
+profile attn_stage_softmax_at_final_kv: rows=512 iters=2 total=4.164421ms per_call=2.08221ms
+profile attn_stage_alloc_scores_buffer: rows=512 iters=2 total=4.169778ms per_call=2.084889ms
+profile attn_stage_shapes: rows=512 heads=24 kv=16384 scores_buffer=384 MB
+profile attn_micro_gemm_interleaved_ldc: rows=512 iters=2 total=12.344µs per_call=6.172µs
+profile attn_micro_gemm_contiguous_ldc: rows=512 iters=2 total=10.267µs per_call=5.133µs
+profile dec_stage_in_projections: rows=512 iters=2 total=364.598µs per_call=182.299µs
+profile dec_stage_mlp_projections: rows=512 iters=2 total=853.009µs per_call=426.504µs
+profile dec_stage_mlp_down_only: rows=512 iters=2 total=255.063µs per_call=127.531µs
+profile dec_stage_mlp_gate_only: rows=512 iters=2 total=260.079µs per_call=130.039µs
+profile dec_stage_conv_step: rows=512 iters=2 total=64.107µs per_call=32.053µs
+profile lm_head_project_only: rows=512 iters=2 total=5.390625ms per_call=2.695312ms
+profile lm_head_project_d2h_argmax: rows=512 iters=2 total=6.133611ms per_call=3.066805ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 120 filtered out; finished in 10.31s
+

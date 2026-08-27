@@ -1,0 +1,237 @@
+{
+ "ok": 36,
+ "total": 36,
+ "success_rate": 1.0,
+ "healthy_after": true,
+ "elapsed_s": 43.1,
+ "results": [
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.5
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.5
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.5
+  },
+  {
+   "kind": "text-1k",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 3.22
+  },
+  {
+   "kind": "image-seven_segment_ocr",
+   "status": 200,
+   "ok": true,
+   "answer": "382",
+   "elapsed_s": 1.12
+  },
+  {
+   "kind": "image-spatial_color",
+   "status": 200,
+   "ok": true,
+   "answer": "red",
+   "elapsed_s": 1.0
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.5
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.53
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.49
+  },
+  {
+   "kind": "text-1k",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 2.93
+  },
+  {
+   "kind": "image-bar_arithmetic",
+   "status": 200,
+   "ok": true,
+   "answer": "12",
+   "elapsed_s": 1.09
+  },
+  {
+   "kind": "image-object_count",
+   "status": 200,
+   "ok": true,
+   "answer": "5",
+   "elapsed_s": 1.12
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.48
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.48
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.49
+  },
+  {
+   "kind": "text-1k",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 4.08
+  },
+  {
+   "kind": "image-seven_segment_ocr",
+   "status": 200,
+   "ok": true,
+   "answer": "382",
+   "elapsed_s": 2.32
+  },
+  {
+   "kind": "image-spatial_color",
+   "status": 200,
+   "ok": true,
+   "answer": "red",
+   "elapsed_s": 1.18
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.63
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.49
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.49
+  },
+  {
+   "kind": "text-1k",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 2.96
+  },
+  {
+   "kind": "image-bar_arithmetic",
+   "status": 200,
+   "ok": true,
+   "answer": "12",
+   "elapsed_s": 1.29
+  },
+  {
+   "kind": "image-object_count",
+   "status": 200,
+   "ok": true,
+   "answer": "5",
+   "elapsed_s": 0.98
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.5
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.51
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.49
+  },
+  {
+   "kind": "text-1k",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 3.3
+  },
+  {
+   "kind": "image-seven_segment_ocr",
+   "status": 200,
+   "ok": true,
+   "answer": "382",
+   "elapsed_s": 1.12
+  },
+  {
+   "kind": "image-spatial_color",
+   "status": 200,
+   "ok": true,
+   "answer": "red",
+   "elapsed_s": 0.97
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.49
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.56
+  },
+  {
+   "kind": "text-short",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 0.53
+  },
+  {
+   "kind": "text-1k",
+   "status": 200,
+   "ok": true,
+   "elapsed_s": 2.94
+  },
+  {
+   "kind": "image-bar_arithmetic",
+   "status": 200,
+   "ok": true,
+   "answer": "12",
+   "elapsed_s": 1.06
+  },
+  {
+   "kind": "image-object_count",
+   "status": 200,
+   "ok": true,
+   "answer": "5",
+   "elapsed_s": 1.26
+  }
+ ]
+}

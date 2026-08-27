@@ -1,0 +1,7 @@
+[scratch-pool] frozen: 200 8.83s sha_match=False
+[scratch-pool] functional text-niah-1024-p50: passed=True (12 tokens, ttft=5.3s)
+[scratch-pool] perf-1024 warmup ok=True ttft=5.752s tpot=0.0683s
+[scratch-pool] perf-1024 repeat=0 ok=True ttft=5.763s tpot=0.0688s
+[scratch-pool] perf-1024 repeat=1 ok=True ttft=8.069s tpot=0.0677s
+[scratch-pool] perf-1024 repeat=2 ok=True ttft=5.390s tpot=0.0685s
+[scratch-pool] ttft_med=5.763132736086845 tpot_med=0.06848245730080943 -> /tmp/apxinf-evidence/ab/ab-scratch-pool.json

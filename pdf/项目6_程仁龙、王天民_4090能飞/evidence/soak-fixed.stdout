@@ -1,0 +1,24 @@
+[10/200] ok=10 fail=0 last=medium/200 health=200 elapsed=79.9s
+[20/200] ok=20 fail=0 last=short/200 health=200 elapsed=0.8s
+[30/200] ok=30 fail=0 last=short/200 health=200 elapsed=1.6s
+[40/200] ok=40 fail=0 last=short/200 health=200 elapsed=1.3s
+[50/200] ok=50 fail=0 last=short/200 health=200 elapsed=0.7s
+[60/200] ok=60 fail=0 last=short/200 health=200 elapsed=0.7s
+[70/200] ok=70 fail=0 last=short/200 health=200 elapsed=1.0s
+[80/200] ok=80 fail=0 last=short/200 health=200 elapsed=0.9s
+[90/200] ok=90 fail=0 last=short/200 health=200 elapsed=0.7s
+[100/200] ok=100 fail=0 last=medium/200 health=200 elapsed=79.0s
+[110/200] ok=110 fail=0 last=short/200 health=200 elapsed=2.3s
+[120/200] ok=120 fail=0 last=medium/200 health=200 elapsed=79.7s
+[130/200] ok=130 fail=0 last=short/200 health=200 elapsed=1.0s
+[140/200] ok=140 fail=0 last=medium/200 health=200 elapsed=79.8s
+[150/200] ok=150 fail=0 last=short/200 health=200 elapsed=1.0s
+[160/200] ok=160 fail=0 last=medium/200 health=200 elapsed=79.7s
+[170/200] ok=170 fail=0 last=short/200 health=200 elapsed=0.8s
+[180/200] ok=180 fail=0 last=short/200 health=200 elapsed=1.2s
+[190/200] ok=190 fail=0 last=short/200 health=200 elapsed=1.5s
+[200/200] ok=200 fail=0 last=short/200 health=200 elapsed=0.7s
+
+soak done: 200/200 success rate=1.0000 failures=0
+final health: [200, 200, 200]
+-> /tmp/apxinf-evidence/soak-fixed/soak.json

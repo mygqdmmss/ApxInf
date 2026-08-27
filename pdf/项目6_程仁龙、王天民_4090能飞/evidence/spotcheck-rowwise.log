@@ -1,0 +1,9 @@
+text-niah-1024-p10: passed=True ttft=1.8s tokens=12 vram=19958MiB
+text-niah-1024-p50: passed=True ttft=1.6s tokens=12 vram=19958MiB
+text-niah-1024-p90: passed=True ttft=1.7s tokens=12 vram=19958MiB
+longdoc-multihop-8192: passed=True ttft=14.7s tokens=9 vram=19958MiB
+longdoc-revision-8192: passed=True ttft=14.8s tokens=9 vram=19958MiB
+longdoc-aggregate-8192: passed=True ttft=14.8s tokens=3 vram=19958MiB
+text-perf-8192: ttft=17.8s total=26.4s tokens=128 vram=19958MiB
+text-perf-16384: ttft=31.9s total=43.6s tokens=128 vram=19958MiB
+DONE

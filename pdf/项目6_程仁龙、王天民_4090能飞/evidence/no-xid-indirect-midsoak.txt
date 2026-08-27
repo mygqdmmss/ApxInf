@@ -1,0 +1,11 @@
+=== timestamp ===
+2026-08-25T22:03:51+08:00
+=== dmesg access ===
+dmesg: read kernel buffer failed: Operation not permitted
+=== nvidia-smi -q ECC/Xid-relevant counters (GPU1) ===
+uuid, memory.used [MiB], memory.total [MiB], temperature.gpu, power.draw [W], clocks.current.sm [MHz], ecc.errors.uncorrected.volatile.total, retired_pages.pending
+GPU-343bc895-b011-22fa-4449-97207aa2bdec, 20220 MiB, 24564 MiB, 74, 403.95 W, 2655 MHz, [N/A], [N/A]
+=== service log CUDA/GPU error grep ===
+0
+=== service log line count ===
+2128

@@ -1,0 +1,27 @@
+
+running 1 test
+test qwen35::cuda::tests::real_layer_profile_harness_prefill_and_decode ... CUDA 0: NVIDIA GeForce RTX 4090 (compute 8.9, sm80-family, 128 SMs)
+profile gdn_prefill: rows=64 iters=16 total=96.434528ms per_call=6.027158ms
+profile attention_prefill: rows=64 iters=16 total=83.419462ms per_call=5.213716ms
+profile gdn_stage_projections_in: rows=64 iters=16 total=18.075378ms per_call=1.129711ms
+profile gdn_stage_conv_prefill: rows=64 iters=16 total=17.299647ms per_call=1.081227ms
+profile gdn_stage_delta_prefill: rows=64 iters=16 total=28.544059ms per_call=1.784003ms
+profile gdn_stage_norm_out_mlp: rows=64 iters=16 total=53.519151ms per_call=3.344946ms
+profile micro_cuda_malloc_free_178mb: rows=64 iters=16 total=34.032202ms per_call=2.127012ms
+profile micro_cuda_malloc_free_4b: rows=64 iters=16 total=47.491µs per_call=2.968µs
+profile micro_mlp_gate_project_only: rows=64 iters=16 total=23.967712ms per_call=1.497982ms
+profile gdn_decode: rows=64 iters=16 total=29.388375ms per_call=1.836773ms
+profile attention_decode: rows=64 iters=16 total=102.87852ms per_call=6.429907ms
+profile gdn_decode_reused_state: rows=64 iters=16 total=15.260071ms per_call=953.754µs
+profile attn_decode_reused_state: rows=64 iters=16 total=15.300287ms per_call=956.267µs
+profile dec_stage_in_projections: rows=64 iters=16 total=3.046571ms per_call=190.41µs
+profile dec_stage_mlp_projections: rows=64 iters=16 total=7.188001ms per_call=449.25µs
+profile dec_stage_mlp_down_only: rows=64 iters=16 total=2.108026ms per_call=131.751µs
+profile dec_stage_mlp_gate_only: rows=64 iters=16 total=2.3523ms per_call=147.018µs
+profile dec_stage_conv_step: rows=64 iters=16 total=537.103µs per_call=33.568µs
+profile lm_head_project_only: rows=64 iters=16 total=42.709826ms per_call=2.669364ms
+profile lm_head_project_d2h_argmax: rows=64 iters=16 total=49.201853ms per_call=3.075115ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 120 filtered out; finished in 11.54s
+

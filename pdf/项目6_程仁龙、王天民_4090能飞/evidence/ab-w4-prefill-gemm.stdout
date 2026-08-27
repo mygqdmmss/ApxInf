@@ -1,0 +1,7 @@
+[w4-prefill-gemm] frozen: 200 14.51s sha_match=False
+[w4-prefill-gemm] functional text-niah-1024-p50: passed=True (12 tokens, ttft=20.0s)
+[w4-prefill-gemm] perf-1024 warmup ok=True ttft=19.943s tpot=0.1048s
+[w4-prefill-gemm] perf-1024 repeat=0 ok=True ttft=19.873s tpot=0.1041s
+[w4-prefill-gemm] perf-1024 repeat=1 ok=True ttft=21.308s tpot=0.1046s
+[w4-prefill-gemm] perf-1024 repeat=2 ok=True ttft=19.818s tpot=0.1036s
+[w4-prefill-gemm] ttft_med=19.87330501526594 tpot_med=0.10413397308879012 -> /tmp/apxinf-evidence/ab/ab-w4-prefill-gemm.json

@@ -1,0 +1,5 @@
+status 200 elapsed 17.62s
+usage {'completion_tokens': 128, 'prompt_tokens': 8, 'total_tokens': 136}
+output len 128
+output sha256 32b08629c08d40575e68c946852ea748a8dd32ad3c712e640073651ba642b945
+response sha256 1d4b6718e785bac63b7565ada30d7a38a38479fcdf209686ae8c0bf275b98c27

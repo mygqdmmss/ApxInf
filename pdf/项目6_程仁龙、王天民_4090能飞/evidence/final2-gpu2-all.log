@@ -1,0 +1,126 @@
+
+running 101 tests
+test backend::graph_tests::backend_graph_capture_replays_preallocated_work ... ok
+test context::tests::attested_context_accepts_expected_uuid_and_rejects_mismatch ... ok
+test context::tests::calibrates_free_memory_with_eight_percent_safety_margin ... ok
+test context::tests::formats_cublas_versions ... ok
+test context::tests::formats_cuda_runtime_versions ... ok
+test context::tests::formats_cuda_uuid_bytes_as_nvidia_uuid ... ok
+test context::tests::rejects_invalid_memory_ranges_and_margin ... ok
+test device_caps::tests::classifies_supported_architecture_families ... ok
+test device_caps::tests::preserves_unknown_architecture ... ok
+test tests::bf16::bf16_checkpoint_weight_projection_uses_transposed_operand ... ok
+test tests::bf16::persisted_bf16_cublaslt_tactic_matches_vendor ... ok
+test tests::fp8::bias_gelu_quant_matches_tanh_reference ... ok
+test tests::fp8::cublas_action_mqa_exact_shape_averages_values ... ok
+test tests::fp8::cublas_language_mqa_exact_shape_averages_values ... ok
+test tests::fp8::embedding_concat_and_euler_run_on_device ... ok
+test tests::fp8::fp8_identity_gemm_runs_on_device ... FAILED
+test tests::fp8::fp8_large_k_gemm_matches_quantized_cpu_reference ... FAILED
+test tests::fp8::fused_fp8_bias_matches_decomposed_path ... ok
+test tests::fp8::fused_vision_fc1_gelu_matches_decomposed_path ... ok
+test tests::fp8::fused_vision_fc2_residual_matches_decomposed_path ... ok
+test tests::fp8::geglu_matches_gelu_tanh_reference ... ok
+test tests::fp8::mqa_flash_uniform_scores_average_values ... ok
+test tests::fp8::mqa_odd_key_count_uses_aligned_scalar_softmax ... ok
+test tests::fp8::raw_rgb_nhwc_and_nchw_match_fp16_patch_pipeline ... ok
+test tests::fp8::vision_mha_exact_siglip_shape_keeps_views_independent ... ok
+test tests::fp8::vision_mha_exact_siglip_shape_matches_sampled_cpu_reference ... ok
+test tests::fp8::vision_mha_matches_nonuniform_cpu_reference ... ok
+test tests::fp8::workspace_reuses_stable_output_addresses ... ok
+test tests::operators::add_bf16_matches_fp32_reference ... ok
+test tests::operators::add_bias_bf16_matches_fp32_reference ... ok
+test tests::operators::attention_softmax_bf16_matches_fp32_reference ... ok
+test tests::operators::attention_softmax_decode_bf16_matches_full ... ok
+test tests::operators::batched_sdpa_prefill_matches_per_row_loop_at_checkpoint_shape ... ok
+test tests::operators::causal_mask_bf16_matches_fp32_reference ... ok
+test tests::operators::concat_2d_bf16_packs_gate_up_correctly ... ok
+test tests::operators::concat_2d_bf16_packs_qkv_correctly ... ok
+test tests::operators::dynamic_kv_cache_accepts_bf16_attention_after_append ... ok
+test tests::operators::embedding_bf16_matches_fp32_reference ... ok
+test tests::operators::gelu_tanh_bf16_matches_fp32_reference ... ok
+test tests::operators::kv_cache_append_bf16_writes_correct_slot ... ok
+test tests::operators::kv_cache_append_decode_bf16_writes_correct_slot ... ok
+test tests::operators::layer_norm_bf16_matches_fp32_reference ... ok
+test tests::operators::mul_bf16_matches_fp32_reference ... ok
+test tests::operators::rms_norm_bf16_matches_fp32_reference ... ok
+test tests::operators::rope_batched_bf16_matches_fp32_reference ... ok
+test tests::operators::rope_bf16_matches_fp32_reference ... ok
+test tests::operators::rope_decode_bf16_matches_rope_bf16 ... ok
+test tests::operators::rope_mrope_bf16_matches_reference_distinct_axes ... ok
+test tests::operators::rope_mrope_bf16_matches_reference_text_only ... ok
+test tests::operators::rope_mrope_decode_bf16_matches_batched_seq1 ... ok
+test tests::operators::rope_vision_2d_bf16_matches_reference ... ok
+test tests::operators::scale_bf16_matches_fp32_reference ... ok
+test tests::operators::silu_bf16_matches_fp32_reference ... ok
+test tests::operators::softmax_bf16_matches_fp32_reference ... ok
+test tests::operators::vision_sdpa_bf16_matches_reference ... ok
+test tests::qwen35_gdn::qwen35_cuda_finite_check_rejects_non_finite_bf16 ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_causal_depthwise_convolution_tracks_four_token_ring ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_convolution_commit_can_be_rolled_back ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_deferred_status_matches_eager_and_latches_non_finite ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_failed_step_and_reset_do_not_leak_request_state ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_fp32_recurrent_update_matches_reference_equation ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_gated_rms_norm_uses_direct_weight_and_silu_gate ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_prefill_convolution_matches_transformers_zero_left_padding ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_recurrent_commit_can_be_rolled_back ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_recurrent_matches_transformers_bf16_qk_and_beta_boundaries ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_recurrent_repeats_one_key_head_across_three_value_heads ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_rejects_short_state_storage_before_launch ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_chunked_matches_eager_step_at_checkpoint_layout ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_crosses_transformers_64_token_chunk_boundary ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_matches_transformers_at_real_key_head_width ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_materializes_beta_scaled_operands ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_non_finite_failure_preserves_recurrent_state ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_normalization_is_invariant_to_total_row_count ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_normalization_matches_pure_reference_for_all_rows ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_prefill_timing_probe_at_checkpoint_layout ... ignored, timing probe: run explicitly with --ignored
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_qk_l2norm_matches_transformers_bf16_boundary ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_recurrent_matches_transformers_chunk_fixture ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_packed_gemv_matches_baseline_kernel_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_packed_gemv_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_prefill_gemm_matches_gemv_path_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_matches_bf16_checkpoint_decompression_rounding ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_matches_k_and_n_packed_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_bf16_conversion_overflow ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_non_finite_output ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_short_activation_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_short_scale_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_validates_shape_dtype_and_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_warp_gemv_matches_packed_kernel_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_warp_gemv_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_device_projection_owns_uploaded_w4_payloads ... ok
+test tests::w8a8::w8a8_gemm_matches_small_reference ... ok
+test tuning::db::tests::parses_legacy_database_without_model_in_key ... ok
+test tuning::db::tests::parses_v1_full_physical_record ... ok
+test tuning::db::tests::rejects_incomplete_v1_header_but_preserves_legacy_compatibility ... ok
+test tuning::db::tests::rejects_wrong_device ... ok
+test tuning::db::tests::test_caps_are_consistent ... ok
+test tuning::db::tests::validates_declared_cuda_and_cublas_versions ... ok
+test tuning::key::tests::m_bucket_is_deterministic ... ok
+test tuning::store::tests::lookup_prefers_exact_then_fastest_bucket_then_none ... ok
+test tuning::store::tests::merge_deduplicates_equal_records_and_rejects_conflicts ... ok
+
+failures:
+
+---- tests::fp8::fp8_identity_gemm_runs_on_device stdout ----
+CUDA 0: NVIDIA GeForce RTX 4090 (compute 8.9, sm80-family, 128 SMs)
+
+thread 'tests::fp8::fp8_identity_gemm_runs_on_device' (1689363) panicked at crates/apxinf-cuda/src/tests/fp8.rs:308:6:
+called `Result::unwrap()` on an `Err` value: Cuda("cuBLAS error: status 15")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::fp8::fp8_large_k_gemm_matches_quantized_cpu_reference stdout ----
+CUDA 0: NVIDIA GeForce RTX 4090 (compute 8.9, sm80-family, 128 SMs)
+
+thread 'tests::fp8::fp8_large_k_gemm_matches_quantized_cpu_reference' (1689364) panicked at crates/apxinf-cuda/src/tests/fp8.rs:399:6:
+called `Result::unwrap()` on an `Err` value: Cuda("cuBLAS error: status 15")
+
+
+failures:
+    tests::fp8::fp8_identity_gemm_runs_on_device
+    tests::fp8::fp8_large_k_gemm_matches_quantized_cpu_reference
+
+test result: FAILED. 98 passed; 2 failed; 1 ignored; 0 measured; 0 filtered out; finished in 5.28s
+

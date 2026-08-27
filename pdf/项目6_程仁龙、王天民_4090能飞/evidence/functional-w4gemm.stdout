@@ -1,0 +1,27 @@
+Traceback (most recent call last):
+  File "/tmp/apxinf-functional-run.py", line 79, in <module>
+    main()
+  File "/tmp/apxinf-functional-run.py", line 57, in main
+    status, ilongdoc-multihop-8192        passed=True tokens=9 t=213.9s
+longdoc-revision-8192        passed=True tokens=9 t=215.8s
+longdoc-aggregate-8192       passed=True tokens=3 t=212.1s
+
+public functional 6/6 -> /tmp/apxinf-evidence/functional-w4gemm/functional.json
+hon3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 503: Service Unavailable

@@ -1,0 +1,8 @@
+text-niah-1024-p10           passed=True tokens=12 t=3.1s
+text-niah-1024-p50           passed=True tokens=12 t=3.5s
+text-niah-1024-p90           passed=True tokens=12 t=3.3s
+longdoc-multihop-8192        passed=True tokens=9 t=21.8s
+longdoc-revision-8192        passed=True tokens=9 t=21.8s
+longdoc-aggregate-8192       passed=True tokens=3 t=24.6s
+
+public functional 6/6 -> /tmp/apxinf-evidence/functional-mm/functional.json

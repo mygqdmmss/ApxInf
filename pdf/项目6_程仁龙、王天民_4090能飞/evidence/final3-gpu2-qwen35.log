@@ -1,0 +1,41 @@
+
+running 36 tests
+test tests::qwen35_gdn::qwen35_cuda_finite_check_rejects_non_finite_bf16 ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_causal_depthwise_convolution_tracks_four_token_ring ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_convolution_commit_can_be_rolled_back ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_deferred_status_matches_eager_and_latches_non_finite ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_failed_step_and_reset_do_not_leak_request_state ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_fp32_recurrent_update_matches_reference_equation ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_gated_rms_norm_uses_direct_weight_and_silu_gate ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_prefill_convolution_matches_transformers_zero_left_padding ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_recurrent_commit_can_be_rolled_back ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_recurrent_matches_transformers_bf16_qk_and_beta_boundaries ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_recurrent_repeats_one_key_head_across_three_value_heads ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_rejects_short_state_storage_before_launch ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_chunked_matches_eager_step_at_checkpoint_layout ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_crosses_transformers_64_token_chunk_boundary ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_matches_transformers_at_real_key_head_width ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_materializes_beta_scaled_operands ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_non_finite_failure_preserves_recurrent_state ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_normalization_is_invariant_to_total_row_count ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_normalization_matches_pure_reference_for_all_rows ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_prefill_timing_probe_at_checkpoint_layout ... ignored, timing probe: run explicitly with --ignored
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_qk_l2norm_matches_transformers_bf16_boundary ... ok
+test tests::qwen35_gdn::qwen35_gdn_cuda_sequence_recurrent_matches_transformers_chunk_fixture ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_packed_gemv_matches_baseline_kernel_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_packed_gemv_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_prefill_gemm_matches_gemv_path_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_matches_bf16_checkpoint_decompression_rounding ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_matches_k_and_n_packed_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_bf16_conversion_overflow ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_non_finite_output ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_short_activation_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_short_scale_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_validates_shape_dtype_and_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_warp_gemv_matches_packed_kernel_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_warp_gemv_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_device_projection_owns_uploaded_w4_payloads ... ok
+
+test result: ok. 35 passed; 0 failed; 1 ignored; 0 measured; 65 filtered out; finished in 3.60s
+

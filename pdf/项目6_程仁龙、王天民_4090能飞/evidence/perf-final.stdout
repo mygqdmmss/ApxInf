@@ -1,0 +1,36 @@
+  text-perf-1024 warmup status=200 ok=True ttft=20.02s total=28.578s tpot=0.0674s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=0 status=200 ok=True ttft=19.982s total=28.633s tpot=0.0681s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=1 status=200 ok=True ttft=19.952s total=28.531s tpot=0.0676s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=2 status=200 ok=True ttft=19.944s total=29.058s tpot=0.0718s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=3 status=200 ok=True ttft=19.918s total=28.492s tpot=0.0675s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=4 status=200 ok=True ttft=19.867s total=28.955s tpot=0.0716s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+text-perf-1024: valid=True success=5/5 ttft_med=19.94424271583557 cv=0.0021685909794102107 tpot_med=0.06811488924298699 tpot_cv=0.031313773494983044 peak_vram=19498MiB
+  text-perf-2048 warmup status=200 ok=True ttft=41.566s total=50.282s tpot=0.0686s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=0 status=200 ok=True ttft=43.07s total=51.817s tpot=0.0689s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=1 status=200 ok=True ttft=43.23s total=51.934s tpot=0.0685s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=2 status=200 ok=True ttft=42.881s total=51.601s tpot=0.0687s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=3 status=200 ok=True ttft=43.099s total=51.743s tpot=0.0681s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=4 status=200 ok=True ttft=42.73s total=51.435s tpot=0.0685s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+text-perf-2048: valid=True success=5/5 ttft_med=43.06986927241087 cv=0.0045726530877884 tpot_med=0.06854349497969695 tpot_cv=0.0043345966603255195 peak_vram=19498MiB
+  text-perf-4096 warmup status=200 ok=True ttft=86.886s total=96.246s tpot=0.0737s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=0 status=200 ok=True ttft=90.231s total=99.567s tpot=0.0735s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=1 status=200 ok=True ttft=87.33s total=96.584s tpot=0.0729s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=2 status=200 ok=True ttft=87.131s total=96.383s tpot=0.0729s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=3 status=200 ok=True ttft=89.96s total=99.221s tpot=0.0729s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=4 status=200 ok=True ttft=87.433s total=96.813s tpot=0.0739s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+text-perf-4096: valid=True success=5/5 ttft_med=87.43344716727734 cv=0.0174051816762904 tpot_med=0.07292053737039642 tpot_cv=0.006241745173236596 peak_vram=19498MiB
+  text-perf-8192 warmup status=200 ok=True ttft=215.141s total=226.305s tpot=0.0879s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=0 status=200 ok=True ttft=214.209s total=225.236s tpot=0.0868s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=1 status=200 ok=True ttft=214.194s total=225.119s tpot=0.086s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=2 status=200 ok=True ttft=211.386s total=222.425s tpot=0.0869s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=3 status=200 ok=True ttft=214.28s total=225.307s tpot=0.0868s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=4 status=200 ok=True ttft=214.237s total=225.286s tpot=0.087s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+text-perf-8192: valid=True success=5/5 ttft_med=214.20870219171047 cv=0.005953954946365262 tpot_med=0.08683148484061083 tpot_cv=0.004577149779831073 peak_vram=19498MiB
+  text-perf-16384 warmup status=200 ok=True ttft=708.847s total=727.412s tpot=0.1462s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=0 status=200 ok=True ttft=712.292s total=731.514s tpot=0.1514s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=1 status=200 ok=True ttft=715.204s total=736.513s tpot=0.1678s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=2 status=200 ok=True ttft=712.073s total=733.222s tpot=0.1665s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=3 status=200 ok=True ttft=712.578s total=731.617s tpot=0.1499s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=4 status=200 ok=True ttft=711.978s total=730.537s tpot=0.1461s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+text-perf-16384: valid=True success=5/5 ttft_med=712.2916884422302 cv=0.0018936773741998509 tpot_med=0.15135823096346668 tpot_cv=0.06437295139867037 peak_vram=19498MiB
+wrote /tmp/apxinf-evidence/perf-final/perf.json

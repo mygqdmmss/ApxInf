@@ -1,0 +1,29 @@
+
+running 1 test
+test qwen35::cuda::tests::real_layer_profile_harness_prefill_and_decode ... CUDA 0: NVIDIA GeForce RTX 4090 (compute 8.9, sm80-family, 128 SMs)
+profile gdn_prefill: rows=64 iters=8 total=49.467246ms per_call=6.183405ms
+profile attention_prefill: rows=64 iters=8 total=49.047821ms per_call=6.130977ms
+profile gdn_stage_projections_in: rows=64 iters=8 total=8.154395ms per_call=1.019299ms
+profile gdn_stage_conv_prefill: rows=64 iters=8 total=7.519584ms per_call=939.948µs
+profile gdn_stage_delta_prefill: rows=64 iters=8 total=14.675674ms per_call=1.834459ms
+profile gdn_stage_norm_out_mlp: rows=64 iters=8 total=23.365117ms per_call=2.920639ms
+profile micro_cuda_malloc_free_178mb: rows=64 iters=8 total=28.047744ms per_call=3.505968ms
+profile micro_cuda_malloc_free_4b: rows=64 iters=8 total=28.697µs per_call=3.587µs
+profile micro_mlp_gate_project_only: rows=64 iters=8 total=7.356053ms per_call=919.506µs
+profile gdn_decode: rows=64 iters=8 total=13.228518ms per_call=1.653564ms
+profile attention_decode: rows=64 iters=8 total=46.940253ms per_call=5.867531ms
+profile gdn_decode_reused_state: rows=64 iters=8 total=7.404996ms per_call=925.624µs
+profile attn_decode_reused_state: rows=64 iters=8 total=7.48444ms per_call=935.555µs
+profile attn_stage_softmax_only: rows=64 iters=8 total=11.924291ms per_call=1.490536ms
+profile attn_softmax_shape: rows=1536 cols=16384 elements=25165824 redundant_block_rescans=64
+profile dec_stage_in_projections: rows=64 iters=8 total=1.389015ms per_call=173.626µs
+profile dec_stage_mlp_projections: rows=64 iters=8 total=3.345347ms per_call=418.168µs
+profile dec_stage_mlp_down_only: rows=64 iters=8 total=1.040245ms per_call=130.03µs
+profile dec_stage_mlp_gate_only: rows=64 iters=8 total=1.032343ms per_call=129.042µs
+profile dec_stage_conv_step: rows=64 iters=8 total=260.19µs per_call=32.523µs
+profile lm_head_project_only: rows=64 iters=8 total=21.39043ms per_call=2.673803ms
+profile lm_head_project_d2h_argmax: rows=64 iters=8 total=24.290594ms per_call=3.036324ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 120 filtered out; finished in 10.72s
+

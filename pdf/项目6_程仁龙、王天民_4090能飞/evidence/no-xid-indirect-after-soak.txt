@@ -1,0 +1,23 @@
+=== after-soak timestamp ===
+2026-08-25T22:54:24+08:00
+=== GPU1 counters ===
+uuid, memory.used [MiB], memory.total [MiB], temperature.gpu, power.draw [W], clocks.current.sm [MHz]
+GPU-343bc895-b011-22fa-4449-97207aa2bdec, 19498 MiB, 24564 MiB, 30, 12.86 W, 210 MHz
+=== all GPUs memory ===
+0, 1 MiB
+1, 19498 MiB
+2, 1 MiB
+3, 1 MiB
+=== service log: CUDA/GPU/NaN/OOM/Xid grep counts ===
+cuda error             0
+CUDA_ERROR             0
+Xid                    0
+uncorrectable          0
+NaN                    0
+out of memory          0
+capacity is exhausted  0
+unhealthy              0
+WorkerStopped          0
+panic                  0
+=== service log lines ===
+3271

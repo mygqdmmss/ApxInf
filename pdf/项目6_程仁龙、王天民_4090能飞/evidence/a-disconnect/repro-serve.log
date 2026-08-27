@@ -1,0 +1,33 @@
+CUDA 0: NVIDIA GeForce RTX 4090 (GPU-343bc895-b011-22fa-4449-97207aa2bdec)
+qwen35 debug logits position 0: top1=5328 top2=198 v1=10.250000 v2=9.250000 margin=1.000000
+qwen35 debug logits position 2: top1=3165 top2=3300 v1=14.125000 v2=13.375000 margin=0.750000
+qwen35 debug hidden embedding position 7: min=-0.0546875 max=0.0634766 mean_abs=0.0126335
+qwen35 debug hidden embedding position 35: min=-0.0576172 max=0.0522461 mean_abs=0.0118315
+qwen35 debug hidden layer-000 position 7: min=-0.5117188 max=16.5000000 mean_abs=0.0431779
+qwen35 debug hidden layer-000 position 35: min=-0.5820312 max=19.7500000 mean_abs=0.0469485
+qwen35 debug hidden layer-003 position 7: min=-3.0000000 max=31.7500000 mean_abs=0.0793459
+qwen35 debug hidden layer-003 position 35: min=-1.8906250 max=30.1250000 mean_abs=0.0711057
+qwen35 debug hidden layer-031 position 7: min=-21.5000000 max=71.0000000 mean_abs=0.6871067
+qwen35 debug hidden layer-031 position 35: min=-14.2500000 max=73.0000000 mean_abs=0.6132768
+qwen35 debug hidden layer-032 position 7: min=-21.2500000 max=70.5000000 mean_abs=0.6866806
+qwen35 debug hidden layer-032 position 35: min=-14.0000000 max=67.0000000 mean_abs=0.6425401
+qwen35 debug hidden layer-060 position 7: min=-38.7500000 max=184.0000000 mean_abs=2.3000515
+qwen35 debug hidden layer-060 position 35: min=-32.2500000 max=188.0000000 mean_abs=2.3893098
+qwen35 debug hidden layer-063 position 7: min=-123.0000000 max=203.0000000 mean_abs=3.9317035
+qwen35 debug hidden layer-063 position 35: min=-92.0000000 max=203.0000000 mean_abs=3.6143266
+qwen35 debug hidden embedding position 83: min=-0.3164062 max=0.2441406 mean_abs=0.0068631
+qwen35 debug hidden layer-000 position 83: min=-0.2373047 max=13.0000000 mean_abs=0.0203701
+qwen35 debug hidden layer-003 position 83: min=-1.5781250 max=20.5000000 mean_abs=0.0608145
+qwen35 debug hidden layer-031 position 83: min=-13.8750000 max=66.5000000 mean_abs=0.6074917
+qwen35 debug hidden layer-032 position 83: min=-13.3750000 max=67.0000000 mean_abs=0.6416845
+qwen35 debug hidden layer-060 position 83: min=-17.2500000 max=172.0000000 mean_abs=2.0716314
+qwen35 debug hidden layer-063 position 83: min=-57.2500000 max=136.0000000 mean_abs=3.4314179
+qwen35 debug logits position 0: top1=46594 top2=76707 v1=24.125000 v2=17.875000 margin=6.250000
+qwen35 debug hidden embedding position 7: min=-0.2832031 max=0.3046875 mean_abs=0.0055488
+qwen35 debug hidden layer-000 position 7: min=-0.3691406 max=12.0625000 mean_abs=0.0236909
+qwen35 debug hidden layer-003 position 7: min=-2.7187500 max=27.1250000 mean_abs=0.0907624
+qwen35 debug hidden layer-031 position 7: min=-14.6250000 max=57.7500000 mean_abs=0.5849555
+qwen35 debug hidden layer-032 position 7: min=-14.6250000 max=53.2500000 mean_abs=0.5840638
+qwen35 debug hidden layer-060 position 7: min=-24.3750000 max=88.5000000 mean_abs=2.8796911
+qwen35 debug hidden layer-063 position 7: min=-74.0000000 max=235.0000000 mean_abs=5.3651766
+qwen35 debug logits position 0: top1=2037 top2=198 v1=11.562500 v2=11.437500 margin=0.125000

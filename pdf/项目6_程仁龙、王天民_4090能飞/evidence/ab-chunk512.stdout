@@ -1,0 +1,27 @@
+[chunk512] frozen: 200 8.83s sha_match=False
+[chunk512] functional text-niah-1024-p50: passed=True (12 tokens, ttft=1.9s)
+[chunk512] perf-1024 warmup ok=True ttft=2.013s tpot=0.0678s
+[chunk512] perf-1024 repeat=0 ok=True ttft=1.790s tpot=0.0678s
+[chunk512] perf-1024 repeat=1 ok=True ttft=1.743s tpot=0.0677s
+[chunk512] perf-1024 repeat=2 ok=True ttft=1.762s tpot=0.0680s
+[chunk512] ttft_med=1.7623575627803802 tpot_med=0.06780354966094175 -> /tmp/apxinf-evidence/ab/ab-chunk512.json
+imeout) as resp:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 215, in urlopen
+    return opener.open(url, data, timeout)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 521, in open
+    response = meth(req, response)
+               ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 630, in http_response
+    response = self.parent.error(
+               ^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 559, in error
+    return self._call_chain(*args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 492, in _call_chain
+    result = func(*args)
+             ^^^^^^^^^^^
+  File "/usr/lib/python3.12/urllib/request.py", line 639, in http_error_default
+    raise HTTPError(req.full_url, code, msg, hdrs, fp)
+urllib.error.HTTPError: HTTP Error 503: Service Unavailable

@@ -1,0 +1,140 @@
+{
+ "case_count": 12,
+ "note": "proxy suite, not the official hidden dataset",
+ "passed_total": 11,
+ "results": [
+  {
+   "category": "exact_retrieval",
+   "expected": "LOCK-H1-719789",
+   "id": "proxy-retrieval-1024-early",
+   "passed": true,
+   "prompt_tokens": 1024,
+   "status": 200,
+   "text": "LOCK-H1-719789",
+   "tokens": 11,
+   "total_s": 79.5
+  },
+  {
+   "category": "exact_retrieval",
+   "expected": "LOCK-H4-630161",
+   "id": "proxy-retrieval-4096-mid",
+   "passed": true,
+   "prompt_tokens": 4096,
+   "status": 200,
+   "text": "LOCK-H4-630161",
+   "tokens": 11,
+   "total_s": 323.25
+  },
+  {
+   "category": "exact_retrieval",
+   "expected": "LOCK-H8-172070",
+   "id": "proxy-retrieval-8192-late",
+   "passed": true,
+   "prompt_tokens": 8192,
+   "status": 200,
+   "text": "LOCK-H8-172070",
+   "tokens": 11,
+   "total_s": 680.43
+  },
+  {
+   "category": "exact_retrieval",
+   "expected": "LOCK-H16-133254",
+   "id": "proxy-retrieval-16384-mid",
+   "passed": true,
+   "prompt_tokens": 16384,
+   "status": 200,
+   "text": "LOCK-H16-133254",
+   "tokens": 12,
+   "total_s": 1638.45
+  },
+  {
+   "category": "distractor_disambiguation",
+   "expected": "PRIME-828749",
+   "id": "proxy-distractor-2048",
+   "passed": true,
+   "prompt_tokens": 2048,
+   "status": 200,
+   "text": "PRIME-828749",
+   "tokens": 10,
+   "total_s": 161.14
+  },
+  {
+   "category": "distractor_disambiguation",
+   "expected": "PRIME-858261",
+   "id": "proxy-distractor-8192",
+   "passed": true,
+   "prompt_tokens": 8192,
+   "status": 200,
+   "text": "PRIME-858261",
+   "tokens": 10,
+   "total_s": 679.94
+  },
+  {
+   "category": "multi_hop",
+   "expected": "RELAY-676437",
+   "id": "proxy-multihop-4096",
+   "passed": true,
+   "prompt_tokens": 4096,
+   "status": 200,
+   "text": "RELAY-676437",
+   "tokens": 10,
+   "total_s": 322.17
+  },
+  {
+   "category": "multi_hop",
+   "expected": "RELAY-506972",
+   "id": "proxy-multihop-8192",
+   "passed": true,
+   "prompt_tokens": 8192,
+   "status": 200,
+   "text": "RELAY-506972",
+   "tokens": 10,
+   "total_s": 679.94
+  },
+  {
+   "category": "revision_resolution",
+   "expected": "CURRENT-974354",
+   "id": "proxy-revision-2048",
+   "passed": true,
+   "prompt_tokens": 2048,
+   "status": 200,
+   "text": "CURRENT-974354",
+   "tokens": 9,
+   "total_s": 158.22
+  },
+  {
+   "category": "revision_resolution",
+   "expected": "CURRENT-453985",
+   "id": "proxy-revision-8192",
+   "passed": true,
+   "prompt_tokens": 8192,
+   "status": 200,
+   "text": "CURRENT-453985",
+   "tokens": 9,
+   "total_s": 680.22
+  },
+  {
+   "category": "aggregate",
+   "expected": "75",
+   "id": "proxy-aggregate-1024",
+   "passed": true,
+   "prompt_tokens": 1024,
+   "status": 200,
+   "text": "75",
+   "tokens": 3,
+   "total_s": 78.45
+  },
+  {
+   "category": "aggregate",
+   "expected": "223",
+   "id": "proxy-aggregate-8192",
+   "passed": false,
+   "prompt_tokens": 8192,
+   "status": 200,
+   "text": "164",
+   "tokens": 4,
+   "total_s": 676.87
+  }
+ ],
+ "schema": "apxinf.proxy-hidden-results.v1"
+}

@@ -1,0 +1,1 @@
+{"capabilities":{"multimodal":false,"pretokenized_input_ids":true,"token_id_output":true},"evaluation_contract":"apxinf.qwen38_27b.inference_interface.v1","fallback_active":false,"max_model_len":32768,"model_revision":"63768c10df38c0395e12ef49edac1bd539eaeeea","parallel_requests":1,"status":"ok","stub":false,"vocab_size":248320}

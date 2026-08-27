@@ -1,0 +1,19 @@
+
+running 14 tests
+test tests::qwen35_w4::qwen35_w4_cuda_packed_gemv_matches_baseline_kernel_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_packed_gemv_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_prefill_gemm_matches_gemv_path_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_matches_bf16_checkpoint_decompression_rounding ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_matches_k_and_n_packed_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_bf16_conversion_overflow ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_non_finite_output ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_short_activation_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_rejects_short_scale_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_projection_validates_shape_dtype_and_storage ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_warp_gemv_matches_packed_kernel_and_cpu_reference ... ok
+test tests::qwen35_w4::qwen35_w4_cuda_warp_gemv_rejects_non_finite_scale ... ok
+test tests::qwen35_w4::qwen35_w4_device_projection_owns_uploaded_w4_payloads ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 87 filtered out; finished in 3.71s
+

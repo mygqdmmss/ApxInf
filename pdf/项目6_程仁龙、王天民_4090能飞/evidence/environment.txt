@@ -1,0 +1,7 @@
+date_utc=2026-08-25T09:45:44Z
+head=2e1b3c24db8ea453f54e1cc3677cdd590cbbf7aa
+branch=integrate/member2
+Build cuda_12.8.r12.8/compiler.35583870_0
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+1, GPU-343bc895-b011-22fa-4449-97207aa2bdec, 580.82.07
+5.15.0-94-generic

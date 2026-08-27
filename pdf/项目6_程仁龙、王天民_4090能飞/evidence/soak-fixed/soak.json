@@ -1,0 +1,66 @@
+{
+ "elapsed_total_s": 10184.9,
+ "fail": 0,
+ "failed_rows": [],
+ "final_health": [
+  [
+   200,
+   {
+    "capabilities": {
+     "multimodal": false,
+     "pretokenized_input_ids": true,
+     "token_id_output": true
+    },
+    "evaluation_contract": "apxinf.qwen38_27b.inference_interface.v1",
+    "fallback_active": false,
+    "max_model_len": 32768,
+    "model_revision": "63768c10df38c0395e12ef49edac1bd539eaeeea",
+    "parallel_requests": 1,
+    "status": "ok",
+    "stub": false,
+    "vocab_size": 248320
+   }
+  ],
+  [
+   200,
+   {
+    "capabilities": {
+     "multimodal": false,
+     "pretokenized_input_ids": true,
+     "token_id_output": true
+    },
+    "evaluation_contract": "apxinf.qwen38_27b.inference_interface.v1",
+    "fallback_active": false,
+    "max_model_len": 32768,
+    "model_revision": "63768c10df38c0395e12ef49edac1bd539eaeeea",
+    "parallel_requests": 1,
+    "status": "ok",
+    "stub": false,
+    "vocab_size": 248320
+   }
+  ],
+  [
+   200,
+   {
+    "capabilities": {
+     "multimodal": false,
+     "pretokenized_input_ids": true,
+     "token_id_output": true
+    },
+    "evaluation_contract": "apxinf.qwen38_27b.inference_interface.v1",
+    "fallback_active": false,
+    "max_model_len": 32768,
+    "model_revision": "63768c10df38c0395e12ef49edac1bd539eaeeea",
+    "parallel_requests": 1,
+    "status": "ok",
+    "stub": false,
+    "vocab_size": 248320
+   }
+  ]
+ ],
+ "meaningful_requests_with_usage_ok": true,
+ "ok": 200,
+ "plan_size": 200,
+ "schema": "apxinf.reliability-soak.v1",
+ "success_rate": 1.0
+}

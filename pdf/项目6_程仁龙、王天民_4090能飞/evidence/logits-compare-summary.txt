@@ -1,0 +1,29 @@
+first mismatch step: 28
+steps compared: 128  matched: 30  diverged: 98
+
+--- BEFORE divergence (steps 0..27) ---
+  max linf            = 0.375000
+  mean linf           = 0.188625
+  all top1 agree      = True
+  oracle exact ties   = [23]
+
+--- AT divergence step 28 ---
+  ref_token                40608
+  cand_token               3175
+  ref_margin               0.0
+  cand_margin              0.125
+  ref_top1                 3175
+  ref_top2                 40608
+  cand_top1                3175
+  cand_top2                40608
+  linf                     0.15625
+  ref_value_at_cand_top1   21.375
+  cand_value_at_ref_top1   21.5
+
+--- AFTER divergence (steps 29..127) ---
+  max linf            = 34.4219
+  min linf            = 11.4062
+  note: inputs differ after the flip, so these logits are not comparable
+
+all oracle exact-tie steps in 0..127: [23, 28, 76]
+matched total: 30/128

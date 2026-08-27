@@ -1,0 +1,6 @@
+longdoc-multihop-8192: passed=True ttft=69.6s tokens=9 vram=19958MiB
+longdoc-revision-8192: passed=True ttft=70.4s tokens=9 vram=19958MiB
+longdoc-aggregate-8192: passed=True ttft=68.4s tokens=3 vram=19958MiB
+text-perf-8192: ttft=69.1s total=80.4s tokens=128 vram=19958MiB
+text-perf-16384: ttft=418.7s total=437.4s tokens=128 vram=19958MiB
+SPOTCHECK_DONE

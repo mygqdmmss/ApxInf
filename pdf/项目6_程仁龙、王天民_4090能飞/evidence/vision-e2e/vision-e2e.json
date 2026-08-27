@@ -1,0 +1,70 @@
+{
+ "passed": 4,
+ "total": 4,
+ "results": [
+  {
+   "category": "seven_segment_ocr",
+   "status": 200,
+   "elapsed_s": 2.05,
+   "content": "382",
+   "normalized": "382",
+   "expected": "382",
+   "passed": true,
+   "usage": {
+    "completion_tokens": 4,
+    "prompt_tokens": 227,
+    "total_tokens": 231
+   },
+   "finish_reason": "stop",
+   "raw": null
+  },
+  {
+   "category": "spatial_color",
+   "status": 200,
+   "elapsed_s": 1.24,
+   "content": "red",
+   "normalized": "red",
+   "expected": "red",
+   "passed": true,
+   "usage": {
+    "completion_tokens": 2,
+    "prompt_tokens": 227,
+    "total_tokens": 229
+   },
+   "finish_reason": "stop",
+   "raw": null
+  },
+  {
+   "category": "bar_arithmetic",
+   "status": 200,
+   "elapsed_s": 1.04,
+   "content": "12",
+   "normalized": "12",
+   "expected": "12",
+   "passed": true,
+   "usage": {
+    "completion_tokens": 3,
+    "prompt_tokens": 233,
+    "total_tokens": 236
+   },
+   "finish_reason": "stop",
+   "raw": null
+  },
+  {
+   "category": "object_count",
+   "status": 200,
+   "elapsed_s": 0.96,
+   "content": "5",
+   "normalized": "5",
+   "expected": "5",
+   "passed": true,
+   "usage": {
+    "completion_tokens": 2,
+    "prompt_tokens": 224,
+    "total_tokens": 226
+   },
+   "finish_reason": "stop",
+   "raw": null
+  }
+ ]
+}

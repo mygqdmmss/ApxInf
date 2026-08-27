@@ -1,0 +1,15 @@
+{
+ "candidate_tokens": 128,
+ "matching_prefix": 28,
+ "first_divergence_index": 28,
+ "candidate_token": 3175,
+ "reference_token": 40608,
+ "mismatch_count": 98,
+ "usage": {
+  "completion_tokens": 128,
+  "prompt_tokens": 8,
+  "total_tokens": 136
+ },
+ "candidate_output_sha256": "081ca4aca162a23a447d725a7d0133a160c39f6d104b5d2ff8bb67f798aea85f",
+ "reference_sha256": "7d44323d5385907096ba9cfdf46e1e7ecb5706dffbe5f58655c1dc89aa198b19"
+}

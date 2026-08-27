@@ -1,0 +1,36 @@
+  text-perf-1024 warmup status=200 ok=True ttft=3.082s total=11.618s tpot=0.0672s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=0 status=200 ok=True ttft=1.618s total=10.02s tpot=0.0662s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=1 status=200 ok=True ttft=1.622s total=10.073s tpot=0.0665s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=2 status=200 ok=True ttft=1.657s total=10.099s tpot=0.0665s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=3 status=200 ok=True ttft=1.629s total=10.09s tpot=0.0666s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+  text-perf-1024 repeat=4 status=200 ok=True ttft=1.629s total=11.258s tpot=0.0758s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 1024, 'total_tokens': 1152}
+text-perf-1024: valid=True success=5/5 ttft_med=1.6287666633725166 cv=0.009275586203800219 tpot_med=0.06654633957100665 tpot_cv=0.06137052204203622 peak_vram=19958MiB
+  text-perf-2048 warmup status=200 ok=True ttft=3.548s total=12.049s tpot=0.0669s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=0 status=200 ok=True ttft=3.286s total=11.792s tpot=0.067s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=1 status=200 ok=True ttft=3.555s total=12.126s tpot=0.0675s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=2 status=200 ok=True ttft=3.293s total=11.805s tpot=0.067s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=3 status=200 ok=True ttft=3.537s total=12.104s tpot=0.0675s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+  text-perf-2048 repeat=4 status=200 ok=True ttft=3.315s total=11.844s tpot=0.0672s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 2048, 'total_tokens': 2176}
+text-perf-2048: valid=True success=5/5 ttft_med=3.314680613577366 cv=0.04007801889880737 tpot_med=0.06715626111180764 tpot_cv=0.0036084613452246916 peak_vram=19958MiB
+  text-perf-4096 warmup status=200 ok=True ttft=6.994s total=15.616s tpot=0.0679s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=0 status=200 ok=True ttft=7.247s total=15.894s tpot=0.0681s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=1 status=200 ok=True ttft=7.161s total=15.761s tpot=0.0677s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=2 status=200 ok=True ttft=6.982s total=15.477s tpot=0.0669s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=3 status=200 ok=True ttft=7.006s total=15.535s tpot=0.0672s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+  text-perf-4096 repeat=4 status=200 ok=True ttft=6.948s total=15.419s tpot=0.0667s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 4096, 'total_tokens': 4224}
+text-perf-4096: valid=True success=5/5 ttft_med=7.0061804205179214 cv=0.018229159535582542 tpot_med=0.06715738720546557 tpot_cv=0.0085597950364827 peak_vram=19958MiB
+  text-perf-8192 warmup status=200 ok=True ttft=17.644s total=26.156s tpot=0.067s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=0 status=200 ok=True ttft=14.812s total=23.374s tpot=0.0674s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=1 status=200 ok=True ttft=14.789s total=23.384s tpot=0.0677s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=2 status=200 ok=True ttft=14.811s total=23.298s tpot=0.0668s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=3 status=200 ok=True ttft=14.867s total=23.407s tpot=0.0672s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+  text-perf-8192 repeat=4 status=200 ok=True ttft=17.592s total=26.142s tpot=0.0673s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 8192, 'total_tokens': 8320}
+text-perf-8192: valid=True success=5/5 ttft_med=14.812220379710197 cv=0.08064598339081575 tpot_med=0.0673274688246682 tpot_cv=0.004584193020265785 peak_vram=19958MiB
+  text-perf-16384 warmup status=200 ok=True ttft=31.986s total=43.962s tpot=0.0943s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=0 status=200 ok=True ttft=31.902s total=41.484s tpot=0.0754s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=1 status=200 ok=True ttft=34.644s total=44.096s tpot=0.0744s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=2 status=200 ok=True ttft=34.841s total=44.305s tpot=0.0745s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=3 status=200 ok=True ttft=31.959s total=41.493s tpot=0.0751s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+  text-perf-16384 repeat=4 status=200 ok=True ttft=34.584s total=44.159s tpot=0.0754s tokens=128 usage={'completion_tokens': 128, 'prompt_tokens': 16384, 'total_tokens': 16512}
+text-perf-16384: valid=True success=5/5 ttft_med=34.584254927933216 cv=0.045091260996874764 tpot_med=0.07507481695864145 tpot_cv=0.006375428762280861 peak_vram=19958MiB
+wrote /tmp/apxinf-evidence/perf-rowwise/perf.json

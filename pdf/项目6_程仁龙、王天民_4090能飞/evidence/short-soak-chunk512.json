@@ -1,0 +1,12 @@
+{
+ "schema": "apxinf.short-soak.v4",
+ "plan": 33,
+ "ok": 33,
+ "rate": 1.0,
+ "elapsed_s": 103.3,
+ "final_health": [
+  200,
+  "ok",
+  false
+ ]
+}

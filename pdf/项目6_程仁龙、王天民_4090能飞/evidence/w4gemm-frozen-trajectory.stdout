@@ -1,0 +1,4 @@
+new sha256      : c92ba7b950ba0a93de2d84520f94a057152260063577afc19c55db34959b102a
+vs oracle ref   : match_prefix=23  agree=24/128
+vs old GEMV path: first_diff=23  agree=26/128
+old vs oracle   : first_diff=28  agree=30/128

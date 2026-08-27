@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/mnt/chuangxin/team2/ApxInf/benchmarks/qwen38_4090/evaluation/run_evaluation.py", line 1685, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/mnt/chuangxin/team2/ApxInf/benchmarks/qwen38_4090/evaluation/run_evaluation.py", line 1444, in main
+    capture = capture_trajectory_reference(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/chuangxin/team2/ApxInf/benchmarks/qwen38_4090/evaluation/run_evaluation.py", line 914, in capture_trajectory_reference
+    raise ValueError(f"cannot capture trajectory: no successful row for {case_id}")
+ValueError: cannot capture trajectory: no successful row for text-perf-1024

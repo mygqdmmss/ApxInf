@@ -1,0 +1,30 @@
+
+running 1 test
+test qwen35::cuda::tests::real_layer_profile_harness_prefill_and_decode ... CUDA 0: NVIDIA GeForce RTX 4090 (compute 8.9, sm80-family, 128 SMs)
+profile gdn_prefill: rows=512 iters=2 total=95.695433ms per_call=47.847716ms
+profile attention_prefill: rows=512 iters=2 total=822.526254ms per_call=411.263127ms
+profile gdn_stage_projections_in: rows=512 iters=2 total=2.852038ms per_call=1.426019ms
+profile gdn_stage_conv_prefill: rows=512 iters=2 total=2.654381ms per_call=1.32719ms
+profile gdn_stage_delta_prefill: rows=512 iters=2 total=9.847401ms per_call=4.9237ms
+profile gdn_stage_norm_out_mlp: rows=512 iters=2 total=13.774921ms per_call=6.88746ms
+profile micro_cuda_malloc_free_178mb: rows=512 iters=2 total=7.300653ms per_call=3.650326ms
+profile micro_cuda_malloc_free_4b: rows=512 iters=2 total=7.181µs per_call=3.59µs
+profile micro_mlp_gate_project_only: rows=512 iters=2 total=2.74101ms per_call=1.370505ms
+profile gdn_decode: rows=512 iters=2 total=3.527633ms per_call=1.763816ms
+profile attention_decode: rows=512 iters=2 total=29.305886ms per_call=14.652943ms
+profile gdn_decode_reused_state: rows=512 iters=2 total=2.087603ms per_call=1.043801ms
+profile attn_decode_reused_state: rows=512 iters=2 total=2.805852ms per_call=1.402926ms
+profile attn_stage_softmax_only: rows=512 iters=2 total=5.316376ms per_call=2.658188ms
+profile attn_softmax_shape: rows=12288 cols=1024 elements=12582912 redundant_block_rescans=4
+profile attn_prefill_staircase: preload=16384 block_rows=512 blocks=32 final_kv=16384 total=23.586759099s per_block_avg=737.086221ms
+profile dec_stage_in_projections: rows=512 iters=2 total=378.15µs per_call=189.075µs
+profile dec_stage_mlp_projections: rows=512 iters=2 total=867.102µs per_call=433.551µs
+profile dec_stage_mlp_down_only: rows=512 iters=2 total=259.691µs per_call=129.845µs
+profile dec_stage_mlp_gate_only: rows=512 iters=2 total=262.721µs per_call=131.36µs
+profile dec_stage_conv_step: rows=512 iters=2 total=64.632µs per_call=32.316µs
+profile lm_head_project_only: rows=512 iters=2 total=5.354794ms per_call=2.677397ms
+profile lm_head_project_d2h_argmax: rows=512 iters=2 total=6.076733ms per_call=3.038366ms
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 120 filtered out; finished in 34.59s
+

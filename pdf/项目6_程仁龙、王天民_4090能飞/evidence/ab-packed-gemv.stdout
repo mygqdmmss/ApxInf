@@ -1,0 +1,7 @@
+[packed-gemv] frozen: 200 9.51s sha_match=False
+[packed-gemv] functional text-niah-1024-p50: passed=True (12 tokens, ttft=19.9s)
+[packed-gemv] perf-1024 warmup ok=True ttft=21.172s tpot=0.0674s
+[packed-gemv] perf-1024 repeat=0 ok=True ttft=19.907s tpot=0.0676s
+[packed-gemv] perf-1024 repeat=1 ok=True ttft=22.531s tpot=0.0671s
+[packed-gemv] perf-1024 repeat=2 ok=True ttft=19.922s tpot=0.0688s
+[packed-gemv] ttft_med=19.922167599201202 tpot_med=0.067638131107871 -> /tmp/apxinf-evidence/ab/ab-packed-gemv.json
