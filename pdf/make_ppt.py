@@ -34,8 +34,23 @@ RULE = RGBColor(0xDD, 0xE1, 0xE8)     # hairlines
 PANEL = RGBColor(0xF5, 0xF7, 0xFA)    # panel fill
 WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 
-CN = "Microsoft YaHei"
-MONO = "Consolas"
+CN = "SimHei"
+MONO = "SimHei"
+
+from pptx.oxml.ns import qn
+
+
+def _apply_font(run, name):
+    """Set the typeface for both latin and east-asian scripts, so CJK text
+    actually renders in the requested font instead of the theme default."""
+    run.font.name = name
+    rPr = run._r.get_or_add_rPr()
+    for tag in ("a:ea", "a:cs"):
+        el = rPr.find(qn(tag))
+        if el is None:
+            el = rPr.makeelement(qn(tag), {})
+            rPr.append(el)
+        el.set("typeface", name)
 
 
 def textbox(slide, x, y, w, h, *, anchor=MSO_ANCHOR.TOP):
@@ -59,7 +74,7 @@ def para(tf, text, *, size=14, bold=False, color=INK, font=CN, space_after=4,
     run.font.size = Pt(size)
     run.font.bold = bold
     run.font.color.rgb = color
-    run.font.name = font
+    _apply_font(run, font)
     return p
 
 
@@ -160,12 +175,12 @@ def bullets(slide, x, y, w, items, *, size=14, gap=9, bullet="—"):
             r1.font.size = Pt(size)
             r1.font.bold = True
             r1.font.color.rgb = INK
-            r1.font.name = CN
+            _apply_font(r1, CN)
             r2 = p.add_run()
             r2.text = rest
             r2.font.size = Pt(size)
             r2.font.color.rgb = MUTED
-            r2.font.name = CN
+            _apply_font(r2, CN)
         else:
             para(tf, f"{bullet} {item}", size=size, color=MUTED, first=(i == 0),
                  space_after=gap, line=1.25)
@@ -218,7 +233,7 @@ def build() -> None:
 
     rect(s, Inches(0.9), Inches(4.42), Inches(11.5), Inches(1.86), fill=PANEL)
     tf = textbox(s, Inches(1.15), Inches(4.6), Inches(11.0), Inches(1.5))
-    para(tf, "本次汇报的四条主线", size=13, bold=True, first=True, space_after=6)
+    para(tf, "汇报主线", size=13, bold=True, first=True, space_after=6)
     para(tf, "① 取得文本 eligibility：协议 12/12、公开功能 6/6、200 请求 soak 100%、7 个性能 cell 全部有效",
          size=12.5, color=MUTED, space_after=4)
     para(tf, "② 用可回滚的配对实验做性能工程：九项接受、八项拒绝，TTFT 约 47 倍、TPOT 约 2 倍",
@@ -226,9 +241,9 @@ def build() -> None:
     para(tf, "③ 交付双 bonus：多模态图文链路（探针 4/4、文本数值零变化）+ C4 四路并发"
              "（官方校准全门通过，goodput 23.5 tok/s）",
          size=12.5, color=MUTED, space_after=4)
-    para(tf, "④ 如实报告边界：无平台批准的 scorer 产物，不声称任何评分结论",
+    para(tf, "④ 评测边界：无平台批准的 scorer 产物，不声称任何评分结论",
          size=12.5, color=WARN, space_after=0)
-    footer(s, "所有数据均来自实测记录（/tmp/apxinf-evidence/ 与 REPORT.md），无估算值")
+    footer(s, "所有数据均来自实测记录（随附证据档案与 REPORT.md），无估算值")
 
     # ───────────────────────── 2. Results at a glance ─────────────────────────
     s = blank(prs)
@@ -259,21 +274,20 @@ def build() -> None:
     table(s, Inches(0.7), y2 + Inches(0.38), Inches(5.3), rows, cw, row_h=Inches(0.315))
 
     tf = textbox(s, Inches(6.5), y2, Inches(6.1), Inches(0.3))
-    para(tf, "correctness 与稳定性门禁（全程未退让）", size=13, bold=True, first=True)
+    para(tf, "correctness 与稳定性门禁", size=13, bold=True, first=True)
     bullets(s, Inches(6.5), y2 + Inches(0.4), Inches(6.0), [
-        ("协议 gate 12/12 ", "7 个负控全部 HTTP 400 + JSON error，且不污染服务"),
+        ("协议 gate 12/12 ", "7 个负控全部 HTTP 400 + JSON error"),
         ("公开功能 6/6 精确 ", "含三个 8K longdoc，EOS 提前终止正常"),
-        ("200 请求混合 soak 100% ", "无 OOM / NaN / fallback / Xid，失败后可恢复"),
-        ("proxy hidden 11/12 ", "达到 ≥11/12 资格线（官方 hidden 集本机不可得）"),
-        ("多模态 + C4 双 bonus 交付 ", "图文探针 4/4、混合 soak 36/36；C4 官方校准"
-                                    "全门通过（Jain 0.9993，goodput 23.53 tok/s）"),
-        ("峰值显存 19958 MiB ", "文本配置未超 24564 MiB；多模态配置峰值 20914 MiB"),
-    ], size=12.5, gap=8)
+        ("200 请求混合 soak 100% ", "无 OOM / NaN / fallback / Xid"),
+        ("proxy hidden 11/12 ", "达到资格线（非官方代理集，已标注）"),
+        ("多模态 + C4 双 bonus ", "图文探针 4/4；C4 官方校准全门通过"),
+        ("峰值显存 ", "文本 19958 / 多模态 20914，上限 24564 MiB"),
+    ], size=12.5, gap=10)
     footer(s, "口径遵循合同：warmup 1 次 + 测 5 次取中位数，TTFT/TPOT 的 CV 均 ≤ 10%")
 
     # ───────────────────────── 3. Task & constraints ─────────────────────────
     s = blank(prs)
-    y = header(s, "任务边界与不可违反的约束", "SCOPE")
+    y = header(s, "任务边界与合同约束", "SCOPE")
     tf = textbox(s, Inches(0.7), y, Inches(11.9), Inches(0.5))
     para(tf, "starter 仓库没有 Qwen3.8、没有 W4A16、没有 GDN、也没有 HTTP/SSE —— "
              "本项目是从零建立的 vertical slice，而非在既有模块上接线。",
@@ -281,23 +295,23 @@ def build() -> None:
 
     y += Inches(0.62)
     left = [
-        ("64 层混合主干", "每四层三个 GDN（线性注意力）+ 一个全注意力，两类层有完全不同的请求状态"),
-        ("GDN 层", "16 key head / 48 value head / head_dim 128，因果卷积 ring buffer + FP32 recurrent state"),
-        ("全注意力层", "24 Q / 4 KV head、head_dim 256，attn_output_gate、partial RoPE 仅前 64 维"),
-        ("逐模块混合量化", "MLP 与投影为 packed W4，in_proj_a/b 与 conv/norm 为 BF16，不可统一走 W4"),
+        ("64 层混合主干", "每四层三个 GDN（线性注意力）+ 一个全注意力，两类层请求状态互不相同"),
+        ("GDN 层", "16 key / 48 value head、head_dim 128，因果卷积 ring buffer + FP32 递归态"),
+        ("全注意力层", "24 Q / 4 KV head、head_dim 256，输出门控 + partial RoPE 仅前 64 维"),
+        ("逐模块混合量化", "MLP 与投影为 packed W4，in_proj 与 conv/norm 为 BF16"),
     ]
     right = [
-        ("单卡固定", "禁止其他 GPU、多 GPU、CPU、vLLM、Transformers 作为服务 fallback"),
-        ("不改评测件", "evaluation/ 下合同、生成器、scorer 一律不动，不手填汇总产物"),
-        ("不硬编码", "不按 case ID、公开 token、已知答案或输出位置特判"),
-        ("health 必须真实", "capability 未验证通过前一律 fail closed；multimodal 直到证据链齐备才翻转为 true"),
+        ("单卡固定", "禁止其他 GPU、CPU、vLLM、Transformers 作为服务 fallback"),
+        ("不改评测件", "evaluation/ 下合同、生成器、scorer 一律不动"),
+        ("不硬编码", "不按 case ID、公开 token 或已知答案特判"),
+        ("health 必须真实", "capability 未经验证前一律 fail closed"),
     ]
     tf = textbox(s, Inches(0.7), y, Inches(5.8), Inches(0.3))
-    para(tf, "模型结构的现实难点", size=13, bold=True, color=ACCENT, first=True)
-    bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.6), left, size=12.5, gap=9)
+    para(tf, "模型结构要点", size=13, bold=True, color=ACCENT, first=True)
+    bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.6), left, size=12.5, gap=11)
     tf = textbox(s, Inches(6.8), y, Inches(5.8), Inches(0.3))
     para(tf, "合同硬约束", size=13, bold=True, color=WARN, first=True)
-    bullets(s, Inches(6.8), y + Inches(0.38), Inches(5.6), right, size=12.5, gap=9)
+    bullets(s, Inches(6.8), y + Inches(0.38), Inches(5.6), right, size=12.5, gap=11)
     footer(s, "分层原则：模型知道层序、状态与融合决策；CUDA backend 只暴露设备管理与单 kernel/单库调用")
 
     # ───────────────────────── 4. Layer 1 evidence ─────────────────────────
@@ -324,15 +338,15 @@ def build() -> None:
     tf = textbox(s, Inches(7.5), y, Inches(5.1), Inches(0.3))
     para(tf, "关键缺陷：客户端断连导致容量泄漏", size=13, bold=True, color=WARN, first=True)
     bullets(s, Inches(7.5), y + Inches(0.4), Inches(5.0), [
-        ("现象 ", "评测客户端在 8K 请求中被杀后，服务连续 653 秒返回 503，"
-                 "而 /health 始终 200 —— 看起来健康却拒绝一切请求"),
-        ("根因 ", "取消信号无处可察：prefill 跑完才返回 session，"
-                 "而 HTTP 层只能从写 socket 失败感知断连，流式请求在此之前无帧可写"),
-        ("修复 ", "socket EOF 监视 + 每 64-token block 边界检查取消，"
-                 "并把中止映射为 Cancelled 而非 Execution，避免误判服务不健康"),
-        ("结果 ", "恢复时间 653 s → 4.86 s；新增 3 个不依赖 GPU 的回归测试，"
-                 "均在修复前失败、修复后通过"),
-    ], size=12, gap=9)
+        ("现象 ", "客户端在 8K 请求中断连后，服务连续 653 s 返回 503，"
+                 "而 /health 始终 200"),
+        ("根因 ", "prefill 完成前无响应字节可写，HTTP 层无法从写失败感知断连，"
+                 "取消信号无处生效"),
+        ("修复 ", "socket EOF 监视 + prefill 块边界检查取消，"
+                 "中止映射为 Cancelled 而非服务故障"),
+        ("结果 ", "恢复时间 653 s → 4.86 s；新增 3 个回归测试，"
+                 "修复前失败、修复后通过"),
+    ], size=12, gap=11)
     footer(s, "无平台批准的 trajectory reference，故 trajectory 标记 unverified，且未使用自捕获自评分")
 
     # ───────────────────────── 5. Optimization path ─────────────────────────
@@ -358,17 +372,17 @@ def build() -> None:
     table(s, Inches(0.7), y, Inches(7.6), rows, cw, row_h=Inches(0.355), body_size=11.5)
 
     tf = textbox(s, Inches(8.6), y, Inches(4.0), Inches(0.3))
-    para(tf, "被拒绝的八项（同样重要）", size=13, bold=True, color=WARN, first=True)
+    para(tf, "被拒绝的八项（负结果）", size=13, bold=True, color=WARN, first=True)
     bullets(s, Inches(8.6), y + Inches(0.4), Inches(3.9), [
-        "deferred GDN 状态检查：0 收益",
+        "deferred GDN 状态检查：零收益",
         "warp-per-output GEMV：−1.8%（噪声内）",
         "uint4 向量化加载：慢 26%",
-        "4 累加器数组：慢 17%（溢出到 local memory）",
+        "4 累加器数组：慢 17%（local memory 溢出）",
         "展开 + FMA 融合：慢 1.3%",
         "Marlin 位技巧 SIMD：慢 54%",
-        "per-group 查表：设计阶段自我否决",
-        "chunk 512 的保守顾虑：被显存复核推翻",
-    ], size=11.5, gap=7, bullet="·")
+        "per-group 查表：设计阶段否决",
+        "chunk 512 初判保守：显存复核后采纳",
+    ], size=11.5, gap=8, bullet="·")
     footer(s, "接受条件：correctness 不降、CV ≤ 10%、端到端收益超过噪声；只有 kernel 变快而端到端无收益一律拒绝")
 
     # ───────────────────────── 6. Finding: softmax ─────────────────────────
@@ -385,15 +399,15 @@ def build() -> None:
 
     y += Inches(1.22)
     tf = textbox(s, Inches(0.7), y, Inches(5.9), Inches(0.3))
-    para(tf, "定位过程：三次修正自己的判断", size=13, bold=True, color=ACCENT, first=True)
+    para(tf, "定位过程（三次假设修正）", size=13, bold=True, color=ACCENT, first=True)
     bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
-        ("① 单层模型只能解释 124 s / 408.7 s ", "→ 改用“阶梯”测量（逐块递增 kv），"
-         "发现单个 attention 层就要 25.05 s，16 层约 400 s"),
-        ("② 怀疑 GEMM 形状退化 ", "→ 重排使 M 从 6 变 512，仅降到 23.59 s，不是主因"),
-        ("③ 怀疑输出 stride ", "→ 微基准显示 GEMM 仅 5.7 µs，交错与连续 stride 无差别"),
-        ("④ 真正的错在我的测量 ", "→ 此前测 softmax 用了 kv_offset=0，valid_cols 平均仅 256 列；"
-         "真实是 15872，换算 2234 ms 与实测 2082 ms 吻合"),
-    ], size=12, gap=8)
+        ("① 单层模型仅解释 124 s / 408.7 s ", "→ 改用逐块递增 kv 的阶梯测量，"
+         "单个 attention 层 25.05 s，16 层约 400 s"),
+        ("② 假设 GEMM 形状退化 ", "→ 重排后 M 从 6 变 512，仅降至 23.59 s，非主因"),
+        ("③ 假设输出 stride 问题 ", "→ 微基准显示 GEMM 仅 5.7 µs，与 stride 无关"),
+        ("④ 定位测量口径错误 ", "→ 此前用 kv_offset=0 测 softmax（平均仅 256 列），"
+         "按真实 15872 列换算得 2234 ms，与实测 2082 ms 吻合"),
+    ], size=12, gap=9)
 
     tf = textbox(s, Inches(6.9), y, Inches(5.7), Inches(0.3))
     para(tf, "修复效果（双卡双副本验证）", size=13, bold=True, color=GOOD, first=True)
@@ -458,22 +472,22 @@ def build() -> None:
 
     # ───────────────────────── 8. Methodology ─────────────────────────
     s = blank(prs)
-    y = header(s, "方法论：让结论可信的四件事", "METHOD")
+    y = header(s, "实验方法与结论可信度保障", "METHOD")
     items = [
         ("四卡并行实验",
          "GPU1 只跑正式服务 A/B（带全局 flock），GPU0 做 profile 归因，GPU2/3 跑测试分片。"
          "一次验证周期从串行 35 s 降到 12 s；三种 chunk 配置的扫描一次 11 s 完成。"),
         ("微基准矩阵做成本归因",
-         "为 W4 GEMV 构造三个诊断变体（只读权重 / 去 dequant / 完整），一次并行跑出"
-         "「访存 41% + 乘加 21% + dequant 算术 39%」的分解，并证明访存已达峰值 81%，"
-         "从此不再猜瓶颈。"),
+         "为 W4 GEMV 构造三个诊断变体（只读权重 / 去 dequant / 完整），一次并行得到"
+         "「访存 41% + 乘加 21% + dequant 算术 39%」的分解，并证明访存已达峰值 81%——"
+         "瓶颈定位由测量给出，不依赖推测。"),
         ("先证明位相等，再写 kernel",
          "Marlin 位技巧动工前先穷举验证：0x4300|q 恰为 128+q、BF16 减法精确、"
          "乘积 ≤13 位有效可被 FP32 精确保存 ⇒ 与生产路径必然位相等。"
          "正确性由数学保证而非事后调容差。"),
         ("对低于 5% 的结论强制双卡双副本复测",
          "一次三卡测量曾显示 4% 收益，双副本复测得 baseline 923/901 µs、候选 934/913 µs —— "
-         "卡间差异 2.4% 大于候选效应，实际慢 1.3%。该协议拦住了一个假阳性。"),
+         "卡间差异 2.4% 大于候选效应，实际慢 1.3%。该协议排除了一次假阳性。"),
     ]
     yy = y
     for i, (t, d) in enumerate(items):
@@ -483,7 +497,7 @@ def build() -> None:
         tf = textbox(s, Inches(1.0), yy + Inches(0.46), Inches(11.3), Inches(0.6))
         para(tf, d, size=12, color=MUTED, first=True, line=1.28)
         yy += Inches(1.22)
-    footer(s, "开发期共有三次“我的推理被数据推翻”的记录，全部写入 REPORT.md，作为决策依据而非隐藏项")
+    footer(s, "开发期共有三次假设被实测推翻，均记录于 REPORT.md，作为后续决策依据")
 
     # ───────────────────────── 9. Trade-offs ─────────────────────────
     s = blank(prs)
@@ -516,37 +530,35 @@ def build() -> None:
 
     # ───────────────────────── 10. Limits & honesty ─────────────────────────
     s = blank(prs)
-    y = header(s, "已知限制与诚实边界", "LIMITS")
+    y = header(s, "已知限制与评测边界", "LIMITS")
     tf = textbox(s, Inches(0.7), y, Inches(11.9), Inches(0.42))
-    para(tf, "以下每一项都写在 REPORT.md 中，不因影响观感而省略。",
-         size=13.5, color=INK, first=True)
+    para(tf, "以下各项均已完整写入 REPORT.md。", size=13.5, color=INK, first=True)
 
     y += Inches(0.55)
     tf = textbox(s, Inches(0.7), y, Inches(5.8), Inches(0.3))
-    para(tf, "不能声称的结论", size=13, bold=True, color=WARN, first=True)
+    para(tf, "不作声称的结论", size=13, bold=True, color=WARN, first=True)
     bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
-        ("无正式 scorer 产物 ", "run_evaluation.py 需要平台批准的 --trajectory-reference"
-                              "（vLLM 对照），本机不存在；未使用 --capture 自捕获自评分"),
-        ("因此不声称 ", "eligible=true、trajectory 得分、基础 100 分，或任何多模态得分"),
-        ("no_xid 为间接证据 ", "本机 dmesg 无读取权限，改以「服务日志零 CUDA 错误 + "
-                            "GPU 计数稳定」佐证，并明确标注为间接"),
-        ("hidden 用自建 proxy ", "官方 hidden 集不可得，11/12 来自独立种子的代理集，已明确标注非官方"),
-        ("多模态官方套件不在本机 ", "「public 4/4」属平台运行项；自建 4 探针同构同格式但非官方公开集"),
-    ], size=12, gap=9)
+        ("无正式 scorer 产物 ", "评分需平台批准的 trajectory reference，"
+                              "本机不存在；未以自捕获方式自评分"),
+        ("因此不声称 ", "eligible、trajectory 得分、基础分或多模态得分"),
+        ("no_xid 为间接证据 ", "dmesg 无读取权限，以服务日志零 CUDA 错误 + "
+                            "GPU 计数稳定佐证，已标注为间接"),
+        ("hidden 用自建代理集 ", "官方 hidden 集不可得，11/12 来自独立种子代理集"),
+        ("图片套件不在本机 ", "public 4/4 属平台运行项；自建探针非官方公开集"),
+    ], size=12, gap=10)
 
     tf = textbox(s, Inches(6.9), y, Inches(5.8), Inches(0.3))
-    para(tf, "性能与 bonus 的现实边界", size=13, bold=True, color=WARN, first=True)
+    para(tf, "性能与 bonus 的边界", size=13, bold=True, color=WARN, first=True)
     bullets(s, Inches(6.9), y + Inches(0.38), Inches(5.7), [
-        ("与合同标尺的距离 ", "prefill 距算术下限约 4.8 倍（1K），decode 距带宽下限约 3.3 倍；"
-                            "TTFT/TPOT 的 60 分按同轮最优参考计分，本实现难以取得动态分"),
-        ("decode 已到局部最优 ", "五次尝试全部失败，反汇编证明 M=1 GEMV 受延迟而非吞吐限制；"
-                              "要突破需 M ≥ 8 的融合 dequant-MMA"),
-        ("长上下文封顶 3.33 分 ", "65536 需 4923 MiB、可用 4606 MiB；131072 需 9403 MiB，"
-                               "即便 INT8 KV 也不可行"),
-        ("C8 与 MTP 未交付 ", "C4 已交付；C8 差在显存——8 份完整请求态需 4.1 GiB，"
-                            "超出 2.36 GiB 预算，共享 scratch 的路径已量化但未实现"),
-    ], size=12, gap=9)
-    footer(s, "PR review 的「分析与决策」正建立在这些负结果之上：八项拒绝各有数据与根因")
+        ("与合同标尺的距离 ", "prefill 距算术下限约 4.8 倍，decode 距带宽下限"
+                            "约 3.3 倍；动态分按同轮最优参考计分"),
+        ("decode 达局部最优 ", "五次微优化实测均无效，反汇编证明 M=1 GEMV "
+                             "受延迟限制；突破需 M≥8 的融合 dequant-MMA"),
+        ("长上下文受显存限制 ", "65536 需 4923 MiB、可用 4606 MiB；131072 不可行"),
+        ("C8 与 MTP 未交付 ", "C4 已交付；C8 需 4.1 GiB 超出预算，"
+                            "共享 scratch 的改造路径已量化但未实现"),
+    ], size=12, gap=10)
+    footer(s, "八项被拒实验均保留数据与根因分析，作为负结果证据记录于 REPORT.md")
 
     # ───────────────────────── 11. Multimodal delivered ─────────────────────────
     s = blank(prs)
@@ -558,36 +570,35 @@ def build() -> None:
 
     y += Inches(0.56)
     tf = textbox(s, Inches(0.7), y, Inches(5.8), Inches(0.3))
-    para(tf, "正确性证据链（每阶段取可得的最强判据）", size=13, bold=True, color=GOOD, first=True)
+    para(tf, "正确性验证（逐阶段）", size=13, bold=True, color=GOOD, first=True)
     bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
-        ("预处理位相等 ", "PNG 解码 + patchify 与 HF processor 输出逐位一致："
-                        "1,204,224 个 f32 零差异"),
-        ("prompt token 级精确 ", "模板渲染 + tokenize + image-pad 展开与 "
-                              "Qwen3VLProcessor 在全部 4 个探针上完全一致"),
-        ("vision 塔对齐 oracle ", "27 块 CUDA BF16 对 FP32 golden 漂移 1.2–8%（离群通道），"
-                               "merged [196,5120] 余弦 0.99972，merger LayerNorm 重归一化"),
-        ("新 kernel 有位相等回归 ", "宽 head_dim SDPA 在 64 处与旧 kernel 逐位一致；"
-                                 "merger 用 erf-GELU（非 tanh），对照 HF 源码核实"),
-    ], size=12, gap=9)
+        ("预处理位相等 ", "PNG 解码 + patchify 与 HF processor 逐位一致"
+                        "（1,204,224 个 f32 零差异）"),
+        ("prompt token 级精确 ", "模板渲染 + tokenize 与 Qwen3VLProcessor "
+                              "在全部探针上一致"),
+        ("vision 塔对齐 oracle ", "27 块 BF16 对 FP32 golden 漂移 1.2–8%，"
+                               "merged 嵌入余弦 0.99972"),
+        ("新 kernel 位相等回归 ", "宽 head_dim SDPA 在 64 处与旧 kernel 逐位一致；"
+                               "merger 采用 erf-GELU，经 HF 源码核实"),
+    ], size=12, gap=10)
 
     tf = textbox(s, Inches(6.9), y, Inches(5.8), Inches(0.3))
-    para(tf, "端到端实测（指定 GPU、严格服务）", size=13, bold=True, color=ACCENT, first=True)
+    para(tf, "端到端实测结果", size=13, bold=True, color=ACCENT, first=True)
     bullets(s, Inches(6.9), y + Inches(0.38), Inches(5.7), [
-        ("自建图片探针 4/4 精确 ", "四个合同类别各一：\"382\" / \"red\" / \"12\" / \"5\"，"
+        ("自建图片探针 4/4 精确 ", "\"382\" / \"red\" / \"12\" / \"5\"，"
                                "单请求端到端 1–2 s"),
-        ("文本门禁在多模态服务复验 ", "协议 12/12、公开功能 6/6、混合图文 soak 36/36"),
-        ("文本数值零变化 ", "冻结 128-token 请求输出与文本配置逐字节一致（三方 SHA 相同）"),
-        ("显存过账 ", "vision 塔 ~956 MiB 常驻，multimodal 下 prefill chunk 自动降为 256，"
+        ("文本门禁复验通过 ", "协议 12/12、公开功能 6/6、图文混合 soak 36/36"),
+        ("文本数值零变化 ", "冻结 128-token 输出与文本配置逐字节一致"),
+        ("显存过账 ", "vision 塔约 956 MiB 常驻，chunk 自动降为 256，"
                     "峰值 20914 / 24564 MiB"),
-    ], size=12, gap=9)
+    ], size=12, gap=10)
 
     rect(s, Inches(0.7), Inches(5.62), Inches(11.9), Inches(1.1), fill=PANEL)
     tf = textbox(s, Inches(0.95), Inches(5.76), Inches(11.4), Inches(0.85))
-    para(tf, "得分口径如实说明", size=12.5, bold=True, color=WARN, first=True, space_after=4)
-    para(tf, "官方图片套件（生成器 / 公开图 / 答案）不在本机，「public 4/4」属平台运行项；"
-             "自建 4 探针与合同同构同格式但非官方公开集，因此不声称任何多模态得分。"
-             "能力关闭时按合同 fail closed：HTTP 400 + error.type=unsupported_capability"
-             "（并修复了此前该路径返回 404 的不合规行为）。",
+    para(tf, "得分口径说明", size=12.5, bold=True, color=WARN, first=True, space_after=4)
+    para(tf, "官方图片套件不在本机，「public 4/4」属平台运行项；自建探针与合同同构同格式"
+             "但非官方公开集，因此不声称多模态得分。能力关闭时按合同 fail closed"
+             "（HTTP 400 + unsupported_capability，并修复了此前返回 404 的不合规行为）。",
          size=11.5, color=MUTED, space_after=0, line=1.3)
     footer(s, "回滚 = 取消 APXINF_ENABLE_MULTIMODAL 单开关；文本 layer-1/layer-2 全部性能数字均在无该开关的配置下测得，不受影响")
 
@@ -604,14 +615,14 @@ def build() -> None:
     para(tf, "实现要点", size=13, bold=True, color=GOOD, first=True)
     bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
         ("批式调度 ", "admission 4 permits + 单 batch worker，每轮一步批式 decode；"
-                    "两阶段交付修复 17 µs 窗口内 permit 未释放导致的 503 竞态"),
-        ("批式 kernel 位相等 ", "GDN conv/recurrent、partial RoPE 的批式版与串行路径"
-                             "逐字节一致（真实权重多步回归断言）"),
+                    "两阶段交付消除 permit 释放竞态"),
+        ("批式 kernel 位相等 ", "GDN conv/recurrent、partial RoPE 批式版与串行路径"
+                             "逐字节一致（真实权重回归断言）"),
         ("prefix cache + 会话回收池 ", "相同 prompt 从模板 fork 约 2 ms；"
-                                    "cudaMallocAsync 流序分配把冷 fork 从 330 ms 降到个位数 ms"),
-        ("单请求零回归 ", "TPOT 62-68 ms 在冻结基线带内，冻结输出字节不变；"
-                       "batch=1 自动走原串行路径"),
-    ], size=12, gap=9)
+                                    "流序分配把冷 fork 从 330 ms 降到个位数 ms"),
+        ("单请求零回归 ", "TPOT 在冻结基线带内，输出字节不变；"
+                       "batch=1 自动回退串行路径"),
+    ], size=12, gap=10)
 
     tf = textbox(s, Inches(6.9), y, Inches(5.8), Inches(0.3))
     para(tf, "官方校准结果（multi-c4-text-perf-1024）", size=13, bold=True, color=ACCENT, first=True)
@@ -629,11 +640,10 @@ def build() -> None:
 
     rect(s, Inches(0.7), Inches(5.62), Inches(11.9), Inches(1.1), fill=PANEL)
     tf = textbox(s, Inches(0.95), Inches(5.76), Inches(11.4), Inches(0.85))
-    para(tf, "C8 边界如实说明", size=12.5, bold=True, color=WARN, first=True, space_after=4)
-    para(tf, "C8 卡在显存而非调度：8 份完整请求态（每份 KV 72 MiB + GDN 443 MiB）需 4.1 GiB，"
-             "超出 2.36 GiB 的 admission 预算。共享 GDN scratch 后每份可降至约 295 MiB、"
-             "算术上可入场，但该改造未实现，因此不声称 C8。调度器、admission 与批式 kernel "
-             "均已按并发数参数化。",
+    para(tf, "C8 未交付原因", size=12.5, bold=True, color=WARN, first=True, space_after=4)
+    para(tf, "受限于显存而非调度：8 份完整请求态需 4.1 GiB，超出 2.36 GiB 的 admission 预算；"
+             "共享 GDN scratch 后每份可降至约 295 MiB、可满足入场条件，但该改造未实现，"
+             "因此不声称 C8。调度器、admission 与批式 kernel 均已按并发数参数化。",
          size=11.5, color=MUTED, space_after=0, line=1.3)
     footer(s, "回滚 = 不设 APXINF_Q35_MAX_CONCURRENCY（或 =1）即恢复精确的冻结单请求 runtime；"
               "并发同批 32 请求全部 200，无 503")
@@ -662,7 +672,7 @@ def build() -> None:
     para(tf, "提交材料对应关系", size=13, bold=True, color=ACCENT, first=True)
     bullets(s, Inches(0.7), y + Inches(0.38), Inches(5.7), [
         ("设计变化与执行阶段 ", "REPORT.md 按第一层/第二层分节，逐项记录"),
-        ("test.py check / run ", "check 已通过并留存日志；run 因缺批准 reference 无法产出评分件，已如实说明"),
+        ("test.py check / run ", "check 已通过并留存日志；run 因缺平台参照件无法产出评分件，等价负载已直测"),
         ("负控制与回归测试 ", "7 个协议负控、3 个断连故障注入、9 组数值回归"),
         ("取舍与限制 ", "REPORT.md 专设 Trade-offs 与 Limits 两节"),
     ], size=12, gap=9)
@@ -684,47 +694,32 @@ def build() -> None:
     s = blank(prs)
     y = header(s, "分工说明", "TEAM")
     tf = textbox(s, Inches(0.7), y, Inches(11.9), Inches(0.42))
-    para(tf, "两人团队。主线实现由本人完成，另一位成员交付离线 benchmark 脚手架。",
-         size=13.5, color=INK, first=True)
+    para(tf, "两人团队，分工依据 git 提交记录。", size=13.5, color=INK, first=True)
 
-    y += Inches(0.62)
-    metric(s, Inches(0.7), y, Inches(3.4), "95%", "程仁龙（本人）",
-           "模型 / kernel / 服务 / 性能 / 双 bonus", ACCENT)
-    metric(s, Inches(4.35), y, Inches(3.4), "5%", "王天民",
-           "离线 benchmark 脚手架", MUTED)
+    y += Inches(0.52)
+    tf = textbox(s, Inches(0.7), y, Inches(7.4), Inches(0.34))
+    para(tf, "程仁龙（负责人）", size=14.5, bold=True, color=ACCENT, first=True)
+    bullets(s, Inches(0.7), y + Inches(0.46), Inches(7.3), [
+        ("模型与 kernel ", "Qwen3.8 config / loader / weights，48 层 GDN 与 "
+                         "16 层全注意力 CUDA 实现，W4A16 解包与 GEMM / GEMV kernel"),
+        ("服务与协议 ", "HTTP / SSE、七项负控、admission、断连取消与故障恢复，"
+                      "/v1/chat/completions 图文入口"),
+        ("正确性验证 ", "离线 oracle（文本 + vision）、hidden 代理集、"
+                      "逐层对拍与位相等断言"),
+        ("性能工程 ", "十七次单变量配对实验、显存账本、四卡并行验证方法"),
+        ("双 bonus 与集成 ", "vision 塔 CUDA 移植、C4 批式调度与批式 kernel、"
+                          "REPORT.md、最终集成与提交"),
+    ], size=12.5, gap=11)
 
-    tf = textbox(s, Inches(8.15), y + Inches(0.06), Inches(4.45), Inches(0.3))
-    para(tf, "王天民交付部分", size=12.5, bold=True, color=MUTED, first=True)
-    bullets(s, Inches(8.15), y + Inches(0.42), Inches(4.35), [
-        "shape inventory 脚本",
-        "experiment validator 脚本",
-        "campaign manifest 与 README",
-        "协作交接记录",
-    ], size=11.5, gap=6, bullet="·")
-
-    y2 = y + Inches(1.72)
-    tf = textbox(s, Inches(0.7), y2, Inches(11.9), Inches(0.3))
-    para(tf, "本人实际承担的范围", size=13, bold=True, color=ACCENT, first=True)
-    y2 += Inches(0.4)
-    quad = [
-        ("模型与 kernel", "Qwen3.8 config / loader / weights，48 层 GDN 与 16 层全注意力的 "
-                        "CUDA 实现，W4A16 解包与 GEMM / GEMV kernel"),
-        ("服务与协议", "HTTP / SSE surface、七项负控、admission、断连取消与故障恢复，"
-                     "/v1/chat/completions 图文入口"),
-        ("正确性证据", "离线 oracle（文本 + vision）、hidden 代理集、逐层对拍与位相等断言"),
-        ("性能工程与双 bonus", "十七次配对实验、显存账本、vision 塔 CUDA 移植、"
-                            "C4 批式调度与批式 kernel、REPORT.md、最终集成与提交"),
-    ]
-    for i, (t, d) in enumerate(quad):
-        cx = Inches(0.7) + Inches(6.05) * (i % 2)
-        cy = y2 + Inches(1.02) * (i // 2)
-        rect(s, cx, cy, Inches(5.85), Inches(0.92), fill=WHITE, line=RULE)
-        tf = textbox(s, cx + Inches(0.22), cy + Inches(0.12), Inches(5.4), Inches(0.26))
-        para(tf, t, size=12.5, bold=True, color=ACCENT, first=True)
-        tf = textbox(s, cx + Inches(0.22), cy + Inches(0.42), Inches(5.4), Inches(0.44))
-        para(tf, d, size=11.5, color=MUTED, first=True, line=1.25)
-    footer(s, "比例依据 git 提交记录；原计划的多人并行 lane 实际退化为单人串行，"
-              "但带锁 GPU 队列与单卡正式重放的纪律始终执行")
+    tf = textbox(s, Inches(8.6), y, Inches(4.0), Inches(0.34))
+    para(tf, "王天民", size=14.5, bold=True, color=ACCENT, first=True)
+    bullets(s, Inches(8.6), y + Inches(0.46), Inches(3.9), [
+        ("离线 benchmark 脚手架 ", "shape inventory 与 "
+                                "experiment validator 脚本"),
+        ("campaign 资料 ", "manifest 与 README"),
+        ("协作记录 ", "交接文档"),
+    ], size=12.5, gap=11)
+    footer(s, "原计划的多人并行安排实际为单人串行推进；GPU 带锁队列与单卡正式重放的纪律全程执行")
 
     # ───────────────────────── 13. Closing ─────────────────────────
     s = blank(prs)
@@ -736,8 +731,8 @@ def build() -> None:
     para(tf, "让它飞起来的不是更强的硬件，是看清了瓶颈的真实位置。",
          size=22, bold=True, color=WHITE, first=True, space_after=10, line=1.3)
     para(tf, "三个最大的瓶颈都不在算术里：softmax 每个线程重复扫描整行、"
-             "W4 投影每行重读整个权重矩阵、80% 的 prefill 花在 cudaMalloc。"
-             "代码没换硬件、没换算法，只是终于测对了地方 —— "
+             "W4 投影每行重读整个权重矩阵、80% 的 prefill 耗在 cudaMalloc。"
+             "未更换硬件与算法，通过正确的测量归因逐一消除结构性瓶颈 —— "
              "TTFT 约 47 倍、TPOT 约 2 倍，correctness 与稳定性全程未退让。",
          size=15, color=RGBColor(0xC5, 0xD9, 0xEE), space_after=0, line=1.35)
 
